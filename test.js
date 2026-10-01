@@ -1,4 +1,5 @@
-// Checagem ponta a ponta: sobe o servidor de verdade apontado para um AudiHoras de mentira. node test.js
+// Checagem ponta a ponta, duas vezes: no servidor local (server.js) e do jeito da Vercel (api/index.js com um
+// Redis de mentira), os dois apontados para um AudiHoras de mentira. node test.js
 const { spawn } = require('node:child_process');
 const http = require('node:http');
 const assert = require('node:assert');
@@ -8,50 +9,70 @@ const AH = require('./audihoras.js');
 const Nucleo = require('./nucleo.js');
 const mock = require('./audihoras-mock.js');
 
-const PORT = 3999, BASE = `http://127.0.0.1:${PORT}`, PORTA_AH = 3998;
+const PORTA_LOCAL = 3999, PORTA_AH = 3998, PORTA_REDIS = 3997, PORTA_VERCEL = 3996;
+const AH_URL = `http://127.0.0.1:${PORTA_AH}/`, ADMIN_EMAIL = 'admin@auditeste.com.br';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'account-'));
+const servidor = (porta, fn) => http.createServer(fn).listen(porta, '127.0.0.1');
+const corpoJson = req => new Promise(ok => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => ok(JSON.parse(b || '{}'))); });
+
 // AudiHoras de mentira (audihoras-mock.js): qualquer usuário entra com a senha demo; só "gestor" é gestor.
-const ahFalso = http.createServer((req, res) => {
-  let b = '';
-  req.on('data', c => { b += c; });
-  req.on('end', () => {
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify(mock.responder(req.url.slice(1), JSON.parse(b || '{}'))));
-  });
-}).listen(PORTA_AH, '127.0.0.1');
-const srv = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
-  env: { ...process.env, PORT, DATA_DIR: dir, AUDIHORAS_API: `http://127.0.0.1:${PORTA_AH}/`, ADMIN_EMAIL: 'admin@auditeste.com.br' },
-  stdio: ['ignore', 'pipe', 'inherit'],
+const ahFalso = servidor(PORTA_AH, async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(mock.responder(req.url.slice(1), await corpoJson(req))));
 });
 
+// Redis de mentira com a API REST da Upstash: só os comandos que o api/index.js usa.
+const redis = new Map(), expira = new Map();
+function comando([op, ...a]) {
+  const k = a[0];
+  if (expira.get(k) < Date.now()) { redis.delete(k); expira.delete(k); }
+  switch (op) {
+    case 'GET': return redis.get(k) ?? null;
+    case 'SET': {
+      if (a.includes('NX') && redis.has(k)) return null;
+      redis.set(k, String(a[1]));
+      const px = a.indexOf('PX'), ex = a.indexOf('EX');
+      if (px > 0) expira.set(k, Date.now() + Number(a[px + 1])); else if (ex > 0) expira.set(k, Date.now() + 1000 * a[ex + 1]); else expira.delete(k);
+      return 'OK';
+    }
+    case 'DEL': return Number(redis.delete(k));
+    case 'HGET': return redis.get(k)?.[a[1]] ?? null;
+    case 'HSET': redis.set(k, { ...redis.get(k), [a[1]]: a[2] }); return 1;
+    case 'EXPIRE': expira.set(k, Date.now() + 1000 * a[1]); return 1;
+    case 'EVAL': { const [, , chave, valor] = a; return redis.get(chave) === valor ? Number(redis.delete(chave)) : 0; } // só a liberação da trava
+  }
+  throw new Error('comando não suportado: ' + op);
+}
+const redisFalso = servidor(PORTA_REDIS, async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ result: comando(await corpoJson(req)) }));
+});
+
+// Servidor local, como no npm start.
+const srv = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
+  env: { ...process.env, PORT: PORTA_LOCAL, DATA_DIR: dir, AUDIHORAS_API: AH_URL, ADMIN_EMAIL },
+  stdio: ['ignore', 'pipe', 'inherit'],
+});
+const localNoAr = new Promise(ok => srv.stdout.on('data', c => String(c).includes('ACCOUNT em') && ok()));
+
+// Jeito Vercel: a mesma função que a Vercel chama, atrás de um servidor http qualquer.
+Object.assign(process.env, { KV_REST_API_URL: `http://127.0.0.1:${PORTA_REDIS}/`, KV_REST_API_TOKEN: 'teste', AUDIHORAS_API: AH_URL, ADMIN_EMAIL });
+const vercel = servidor(PORTA_VERCEL, require('./api/index.js'));
+
 // Um "navegador" por pessoa, cada um com o seu cookie.
-function cliente() {
+const cliente = base => {
   let cookie = '';
   return async (metodo, url, body) => {
-    const r = await fetch(BASE + url, { method: metodo, headers: { 'Content-Type': 'application/json', cookie }, body: body && JSON.stringify(body) });
+    const r = await fetch(base + url, { method: metodo, headers: { 'Content-Type': 'application/json', cookie }, body: body && JSON.stringify(body) });
     cookie = r.headers.get('set-cookie')?.split(';')[0] ?? cookie;
     const json = r.headers.get('content-type')?.includes('json');
     return { st: r.status, j: json ? await r.json() : Buffer.from(await r.arrayBuffer()) };
   };
-}
+};
 
-(async () => {
-  // Regras puras
-  assert.equal(R.diasUteis('2026-09-01', '2026-09-30', { feriados: { '2026-09-07': 'Independência' } }).length, 21);
-  await assert.rejects(AH.chamar({ api: 'http://x/' }, 'SetAtivo'), /somente leitura/, 'serviço de escrita bloqueado');
-
-  // Banco antigo (com senha e convite) e primeiro acesso real: o administrador que nunca entrou dá lugar ao do ADMIN_EMAIL.
-  const velho = { usuarios: [{ id: 'a', nome: 'Admin', email: 'admin@auditeste.com.br', perfil: 'admin', status: 'convite', senha: 'scrypt$x' }],
-    pedidos: [], projetos: {}, registros: [], fechamentos: {}, comentarios: {}, auditoria: [] };
-  const n0 = Nucleo.criar({ db: velho, salvar() {}, uuid: () => 'b' });
-  assert.equal(velho.usuarios[0].senha, undefined, 'senha antiga apagada');
-  assert.deepEqual(n0.garantirAdmin('Pedro.Ramos@auditeste.com.br'), { email: 'pedro.ramos@auditeste.com.br', usuario: 'pedro.ramos' });
-  assert.deepEqual(velho.usuarios.map(u => [u.email, u.status]), [['pedro.ramos@auditeste.com.br', 'ativo']]);
-  assert.deepEqual(n0.garantirAdmin(), { email: 'pedro.ramos@auditeste.com.br', usuario: 'pedro.ramos' }, 'sem ADMIN_EMAIL, fica quem já estava');
-
-
-  await new Promise(ok => srv.stdout.on('data', c => String(c).includes('ACCOUNT em') && ok()));
-  const ger = cliente(), rh = cliente(), adm = cliente(), anon = cliente();
+// O sistema inteiro pela API. docCru(id) devolve o documento do cofre como ficou guardado.
+async function ponta(base, docCru) {
+  const ger = cliente(base), rh = cliente(base), adm = cliente(base), anon = cliente(base);
 
   // Primeiro acesso: o administrador do ADMIN_EMAIL entra e cadastra a equipe do teste.
   assert.equal((await adm('POST', '/api/login', { usuario: 'admin', senha: 'demo' })).st, 200);
@@ -85,17 +106,17 @@ function cliente() {
 
   // Ausências
   const pdf = 'data:application/pdf;base64,' + Buffer.from('%PDF-1.4 atestado').toString('base64');
-  const base = { colabId: 11, tipo: 'atestado', inicio: '2026-09-21', fim: '2026-09-22', obs: 'teste' };
-  assert.equal((await ger('POST', '/api/registros', { ...base, colabId: 999 })).st, 403, 'fora da equipe');
-  assert.equal((await ger('POST', '/api/registros', { ...base, fim: '2026-09-01' })).st, 400, 'período invertido');
-  assert.equal((await ger('POST', '/api/registros', { ...base, arquivo: { nome: 'x.html', dataUrl: 'data:text/html;base64,PGI+' } })).st, 400, 'tipo de arquivo');
-  const { j: reg } = await ger('POST', '/api/registros', { ...base, arquivo: { nome: 'atestado.pdf', dataUrl: pdf } });
+  const base_ = { colabId: 11, tipo: 'atestado', inicio: '2026-09-21', fim: '2026-09-22', obs: 'teste' };
+  assert.equal((await ger('POST', '/api/registros', { ...base_, colabId: 999 })).st, 403, 'fora da equipe');
+  assert.equal((await ger('POST', '/api/registros', { ...base_, fim: '2026-09-01' })).st, 400, 'período invertido');
+  assert.equal((await ger('POST', '/api/registros', { ...base_, arquivo: { nome: 'x.html', dataUrl: 'data:text/html;base64,PGI+' } })).st, 400, 'tipo de arquivo');
+  const { j: reg } = await ger('POST', '/api/registros', { ...base_, arquivo: { nome: 'atestado.pdf', dataUrl: pdf } });
   assert.equal(reg.documento, true);
   assert.equal(reg.arquivo, undefined, 'gerente não recebe dados do documento');
-  const sob = await ger('POST', '/api/registros', { ...base, tipo: 'falta', fim: '2026-09-21' });
+  const sob = await ger('POST', '/api/registros', { ...base_, tipo: 'falta', fim: '2026-09-21' });
   assert.equal(sob.st, 409);
   assert.equal(sob.j.sobreposto, true);
-  const { j: falta } = await ger('POST', '/api/registros', { ...base, tipo: 'falta', inicio: '2026-09-28', fim: '2026-09-28', arquivo: undefined });
+  const { j: falta } = await ger('POST', '/api/registros', { ...base_, tipo: 'falta', inicio: '2026-09-28', fim: '2026-09-28', arquivo: undefined });
   assert.equal((await ger('POST', `/api/registros/${falta.id}/status`, { status: 'validada' })).st, 403, 'gerente não valida');
   assert.equal((await ger('POST', `/api/registros/${falta.id}/status`, { status: 'cancelada' })).st, 400, 'cancelar exige motivo');
 
@@ -106,11 +127,10 @@ function cliente() {
   assert.equal((await rh('GET', '/api/foto/11')).st, 403, 'RH não lê fotos do AudiHoras');
   assert.equal((await ger('GET', '/api/arquivo/' + doc.id)).st, 403, 'gerente não abre documento médico');
   assert.equal((await rh('GET', '/api/arquivo/' + doc.id)).j.toString(), '%PDF-1.4 atestado');
-  assert.ok(!fs.readFileSync(path.join(dir, 'cofre', doc.id)).includes('%PDF'), 'arquivo cifrado em disco');
+  assert.ok(!docCru(doc.id).includes('%PDF'), 'documento guardado cifrado');
   assert.equal((await rh('POST', `/api/registros/${reg.id}/status`, { status: 'validada' })).j.status, 'validada');
 
-  // Fechamento de set/2026. Os dados de exemplo acompanham a data de hoje, então o teste leva o
-  // fechamento até "em conferência" antes de começar, qualquer que seja a situação inicial.
+  // Fechamento de set/2026: leva até "em conferência" antes de começar, qualquer que seja a situação inicial.
   const f = (acao, obs) => ger('POST', '/api/fechamentos', { ano: 2026, mes: 9, projetoId: 101, acao, obs });
   assert.equal((await ger('POST', '/api/fechamentos', { ano: 2026, mes: 9, projetoId: 999, acao: 'conferir' })).st, 403);
   const inicial = (await ger('GET', '/api/dados?ano=2026&mes=9')).j.fechamentos['2026-09|101']?.status || 'preparacao';
@@ -138,7 +158,7 @@ function cliente() {
   assert.equal((await ger('GET', '/api/usuarios')).st, 403);
   // Acesso total: tudo o que os outros perfis têm; as horas continuam exigindo gestor no AudiHoras.
   assert.equal((await adm('GET', '/api/rh')).st, 403);
-  const eu = (await adm('GET', '/api/usuarios')).j.usuarios.find(u => u.email === 'admin@auditeste.com.br');
+  const eu = (await adm('GET', '/api/usuarios')).j.usuarios.find(u => u.email === ADMIN_EMAIL);
   assert.equal((await adm('POST', `/api/usuarios/${eu.id}`, { perfil: 'total' })).st, 200, 'administrador passa a si mesmo para acesso total');
   assert.equal((await adm('GET', '/api/rh')).st, 200);
   const semHoras = await adm('GET', '/api/dados?ano=2026&mes=9');
@@ -148,9 +168,13 @@ function cliente() {
   const { j: novo } = await adm('POST', '/api/usuarios', { nome: 'Nova Pessoa', email: 'nova@auditeste.com.br', perfil: 'financeiro' });
   assert.equal(novo.vinculo, 'nova', 'vínculo pelo começo do e-mail');
   assert.equal((await adm('POST', '/api/usuarios', { nome: 'X', email: 'nova@auditeste.com.br', perfil: 'rh' })).st, 409, 'e-mail único');
-  assert.equal((await adm('POST', '/api/usuarios', { nome: 'X', email: 'x@outro.demo', perfil: 'rh', audihoras: 'Nova' })).st, 409, 'um usuário do AudiHoras, uma conta');
-  const nova = cliente();
+  assert.equal((await adm('POST', '/api/usuarios', { nome: 'X', email: 'x@outro.com', perfil: 'rh', audihoras: 'Nova' })).st, 409, 'um usuário do AudiHoras, uma conta');
+  const nova = cliente(base);
   assert.equal((await nova('POST', '/api/login', { usuario: 'nova', senha: 'demo' })).st, 200, 'entra direto, sem convite');
+  await adm('POST', `/api/usuarios/${novo.id}`, { perfil: 'financeiro', audihoras: 'outra.pessoa' });
+  assert.equal((await nova('GET', '/api/me')).j.usuario, undefined, 'trocar o usuário do AudiHoras derruba a sessão');
+  await adm('POST', `/api/usuarios/${novo.id}`, { perfil: 'financeiro', audihoras: '' });
+  assert.equal((await nova('POST', '/api/login', { usuario: 'nova', senha: 'demo' })).st, 200);
   await adm('POST', `/api/usuarios/${novo.id}/status`, { status: 'bloqueado' });
   assert.equal((await nova('GET', '/api/me')).j.usuario, undefined, 'bloqueio derruba a sessão');
   assert.equal((await nova('POST', '/api/login', { usuario: 'nova', senha: 'demo' })).j.erro, 'Seu acesso está indisponível. Contate o administrador.');
@@ -165,9 +189,36 @@ function cliente() {
 
   assert.equal((await ger('POST', '/api/logout')).st, 200);
   assert.equal((await ger('GET', '/api/dados?ano=2026&mes=9')).st, 401);
+}
+
+(async () => {
+  // Regras puras
+  assert.equal(R.diasUteis('2026-09-01', '2026-09-30', { feriados: { '2026-09-07': 'Independência' } }).length, 21);
+  await assert.rejects(AH.chamar({ api: 'http://x/' }, 'SetAtivo'), /somente leitura/, 'serviço de escrita bloqueado');
+
+  // Banco antigo (com senha e convite) e primeiro acesso real: o administrador que nunca entrou dá lugar ao do ADMIN_EMAIL.
+  const velho = { usuarios: [{ id: 'a', nome: 'Admin', email: 'admin@auditeste.com.br', perfil: 'admin', status: 'convite', senha: 'scrypt$x' }],
+    pedidos: [], projetos: {}, registros: [], fechamentos: {}, comentarios: {}, auditoria: [] };
+  const n0 = Nucleo.criar({ db: velho, salvar() {}, uuid: () => 'b' });
+  assert.equal(velho.usuarios[0].senha, undefined, 'senha antiga apagada');
+  assert.deepEqual(n0.garantirAdmin('Pedro.Ramos@auditeste.com.br'), { email: 'pedro.ramos@auditeste.com.br', usuario: 'pedro.ramos' });
+  assert.deepEqual(velho.usuarios.map(u => [u.email, u.status]), [['pedro.ramos@auditeste.com.br', 'ativo']]);
+  assert.deepEqual(n0.garantirAdmin(), { email: 'pedro.ramos@auditeste.com.br', usuario: 'pedro.ramos' }, 'sem ADMIN_EMAIL, fica quem já estava');
+
+  await localNoAr;
+  await ponta(`http://127.0.0.1:${PORTA_LOCAL}`, id => fs.readFileSync(path.join(dir, 'cofre', id)));
+  console.log('ok: servidor local');
+
+  await ponta(`http://127.0.0.1:${PORTA_VERCEL}`, id => Buffer.from(redis.get('account:doc:' + id), 'base64'));
+  // No Redis não pode ficar nada que sirva de senha do AudiHoras, nem o sid de alguém.
+  const pmdGestor = AH.md5('gestor' + AH.md5('audi' + 'demo'));
+  const tudo = JSON.stringify([...redis]);
+  assert.ok(!tudo.includes(pmdGestor), 'pmd do AudiHoras cifrado no Redis');
+  assert.ok(![...redis.keys()].some(k => k.startsWith('account:trava:')), 'nenhuma trava esquecida');
+  console.log('ok: jeito Vercel (Redis)');
   console.log('ok: ACCOUNT passou em todas as checagens');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => {
   srv.kill();
-  ahFalso.close();
+  for (const s of [ahFalso, redisFalso, vercel]) s.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });

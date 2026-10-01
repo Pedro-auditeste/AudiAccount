@@ -1,11 +1,13 @@
-// ACCOUNT · Gestão de Contas e Projetos (Auditeste). Servidor sem dependências.
-// Aqui fica só o que é de Node: rede, disco e criptografia. Regras e rotas estão em nucleo.js.
+// ACCOUNT · Gestão de Contas e Projetos (Auditeste). Servidor local sem dependências (npm start).
+// Aqui fica o que é desta máquina: rede, disco e sessões na memória. Regras e rotas estão em nucleo.js;
+// a versão da Vercel é api/index.js.
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const AH = require('./audihoras.js');
 const Nucleo = require('./nucleo.js');
+const C = require('./http-comum.js');
 
 const PORT = +process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -16,25 +18,14 @@ const DB_ARQ = path.join(DADOS, 'db.json');
 const PUBLICO = path.join(__dirname, 'public');
 fs.mkdirSync(COFRE, { recursive: true });
 
-// ---------- Cofre ----------
-// Documentos do cofre ficam cifrados (AES-256-GCM); a chave vem de COFRE_KEY ou de data/cofre.key.
+// A chave do cofre vem de COFRE_KEY ou de data/cofre.key.
 const CHAVE_ARQ = path.join(DADOS, 'cofre.key');
 if (!process.env.COFRE_KEY && !fs.existsSync(CHAVE_ARQ)) fs.writeFileSync(CHAVE_ARQ, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
-const CHAVE = Buffer.from(process.env.COFRE_KEY || fs.readFileSync(CHAVE_ARQ, 'utf8').trim(), 'hex');
-function cifrar(buf) {
-  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', CHAVE, iv);
-  const corpo = Buffer.concat([c.update(buf), c.final()]);
-  return Buffer.concat([iv, c.getAuthTag(), corpo]);
-}
-function decifrar(buf) {
-  const d = crypto.createDecipheriv('aes-256-gcm', CHAVE, buf.subarray(0, 12));
-  d.setAuthTag(buf.subarray(12, 28));
-  return Buffer.concat([d.update(buf.subarray(28)), d.final()]);
-}
+const cofre = C.cofre(process.env.COFRE_KEY || fs.readFileSync(CHAVE_ARQ, 'utf8').trim());
 
-// ---------- Banco local ----------
 let db = fs.existsSync(DB_ARQ) ? JSON.parse(fs.readFileSync(DB_ARQ, 'utf8')) : {};
 db = { usuarios: [], projetos: {}, registros: [], fechamentos: {}, comentarios: {}, auditoria: [], ...db };
+const sessoes = new Map();
 
 const nucleo = Nucleo.criar({
   db,
@@ -43,8 +34,9 @@ const nucleo = Nucleo.criar({
     fs.renameSync(DB_ARQ + '.tmp', DB_ARQ);
   },
   uuid: () => crypto.randomUUID(),
-  gravarDoc: (id, base64) => fs.writeFileSync(path.join(COFRE, id), cifrar(Buffer.from(base64, 'base64'))),
-  lerDoc: id => decifrar(fs.readFileSync(path.join(COFRE, id))),
+  sessoes: { ler: sid => sessoes.get(sid), gravar: (sid, s) => { sessoes.set(sid, s); }, apagar: sid => { sessoes.delete(sid); } },
+  gravarDoc: (id, base64) => fs.writeFileSync(path.join(COFRE, id), cofre.cifrar(Buffer.from(base64, 'base64'))),
+  lerDoc: id => cofre.decifrar(fs.readFileSync(path.join(COFRE, id))),
   apagarDoc: id => fs.rmSync(path.join(COFRE, id), { force: true }),
   conectarAH: (usuario, senha) => AH.conectar(API, usuario, senha),
   dadosAH: AH.dados,
@@ -54,22 +46,6 @@ const nucleo = Nucleo.criar({
 const primeiro = nucleo.garantirAdmin(process.env.ADMIN_EMAIL);
 if (primeiro?.email) console.log(`Primeiro acesso: o administrador (${primeiro.email}) entra com o usuário "${primeiro.usuario}" e a senha dele no AudiHoras. Para ser outra pessoa, rode com ADMIN_EMAIL=email.dela@auditeste.com.br.`);
 else if (primeiro) console.log('Nenhum administrador cadastrado: rode com ADMIN_EMAIL=seu.email@auditeste.com.br.');
-
-// ---------- HTTP ----------
-const falha = (status, msg) => Object.assign(new Error(msg), { status });
-function corpo(req, limite = 12e6) {
-  return new Promise((ok, erro) => {
-    let total = 0;
-    const partes = [];
-    req.on('data', c => {
-      total += c.length;
-      if (total > limite) { erro(falha(413, 'Documento grande demais (máx. 8 MB)')); req.destroy(); } else partes.push(c);
-    });
-    req.on('end', () => {
-      try { ok(JSON.parse(Buffer.concat(partes).toString() || '{}')); } catch { erro(falha(400, 'JSON inválido')); }
-    });
-  });
-}
 
 const TIPO_ARQ = { '.html': 'text/html; charset=utf-8', '.png': 'image/png', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 function estatico(res, pathname) {
@@ -83,28 +59,15 @@ function estatico(res, pathname) {
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
-  const json = (st, obj) => {
-    res.writeHead(st, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-    res.end(JSON.stringify(obj));
-  };
   try {
     if (!url.pathname.startsWith('/api/')) return estatico(res, url.pathname);
-    const r = await nucleo.tratar(req.method, url.pathname, {
-      sid: /(?:^|;\s*)sid=([\w-]+)/.exec(req.headers.cookie || '')?.[1],
-      corpo: req.method === 'GET' ? {} : await corpo(req),
+    C.responder(res, await nucleo.tratar(req.method, url.pathname, {
+      sid: C.sid(req),
+      corpo: req.method === 'GET' ? {} : await C.lerCorpo(req, 12e6),
       busca: url.searchParams,
-    });
-    if (r.cookie !== undefined) res.setHeader('Set-Cookie', r.cookie ? `sid=${r.cookie}; HttpOnly; SameSite=Strict; Path=/` : 'sid=; Max-Age=0; Path=/');
-    if (!r.arquivo) return json(r.status, r.json);
-    const imagem = r.arquivo.mime.startsWith('image/');
-    res.writeHead(200, {
-      'Content-Type': r.arquivo.mime, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': r.arquivo.cache || 'no-store',
-      'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(r.arquivo.nome)}`,
-      ...(imagem ? { 'Content-Security-Policy': "default-src 'none'" } : {}),
-    });
-    res.end(typeof r.arquivo.dados === 'string' ? Buffer.from(r.arquivo.dados, 'base64') : r.arquivo.dados);
+    }));
   } catch (e) {
     if (!e.status) console.error(e);
-    json(e.status || 500, { erro: e.status ? e.message : 'Erro interno: ' + e.message });
+    C.responder(res, { status: e.status || 500, json: { erro: e.status ? e.message : 'Erro interno: ' + e.message } });
   }
 }).listen(PORT, HOST, () => console.log(`ACCOUNT em http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`));

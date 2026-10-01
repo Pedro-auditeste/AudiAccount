@@ -45,7 +45,7 @@ const areaDe = pag => ['gerente', 'rh', 'admin', 'financeiro'].find(k => MENUS[k
 const dadosDa = pag => ({ gerente: D, rh: RHD, admin: ADM, financeiro: true })[areaDe(pag)];
 const ICONE_SIT = { futuro: '◷', conflito: '⚠', refletida: '✓', sem_apontamento: '⚠' };
 
-let EU = null;
+let EU = null, LIMITE_DOC = 8e6; // a Vercel aceita menos (o servidor diz quanto)
 let D = null, RHD = null, ADM = null, AUD = null, SEM_HORAS = '';
 let comp = { ano: HOJE.getFullYear(), mes: HOJE.getMonth() + 1 };
 const F = { prjStatus: '', prjArq: false, eqProj: '', hColab: '', hTipo: '', hStatus: 'ativos', hDe: '', hAte: '', relTipo: 'consolidado', rhStatus: 'abertas', rhTipo: '', fecProj: 0 };
@@ -693,7 +693,7 @@ async function salvarRegistro(ev, f, confirmar = false) {
   const dados = Object.fromEntries(new FormData(f)), arq = f.arquivo.files[0];
   delete dados.arquivo;
   if (dados.fim < dados.inicio) return aviso('A data final vem antes da inicial.', true);
-  if (arq && arq.size > 8e6) return aviso('Documento grande demais (máx. 8 MB).', true);
+  if (arq && arq.size > LIMITE_DOC) return aviso(`Documento grande demais (máx. ${LIMITE_DOC / 1e6} MB).`, true);
   const b = f.querySelector('.btn');
   b.disabled = true;
   try {
@@ -978,7 +978,7 @@ async function statusRH(id, status) {
 async function anexarDocumento(id, input) {
   const arq = input.files[0];
   if (!arq) return;
-  if (arq.size > 8e6) return aviso('Documento grande demais (máx. 8 MB).', true);
+  if (arq.size > LIMITE_DOC) return aviso(`Documento grande demais (máx. ${LIMITE_DOC / 1e6} MB).`, true);
   try {
     await api(`/api/registros/${id}/documento`, { method: 'POST', body: { arquivo: { nome: arq.name, dataUrl: await lerArquivo(arq) } } });
     aviso('Documento guardado no cofre.');
@@ -1095,6 +1095,7 @@ function financeiro() {
 // ---------- início ----------
 (async () => {
   const me = await api('/api/me').catch(() => ({}));
+  LIMITE_DOC = me.limiteDoc || LIMITE_DOC;
   if (me.usuario) {
     EU = me.usuario;
     abrirApp();

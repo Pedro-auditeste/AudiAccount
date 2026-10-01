@@ -19,9 +19,19 @@ Abre em http://localhost:3000. Para a rede acessar: `HOST=0.0.0.0 npm start`.
 
 Variáveis: `PORT` (3000), `HOST` (127.0.0.1), `AUDIHORAS_API` (http://152.249.241.111:72/api/), `DATA_DIR` (./data), `ADMIN_EMAIL`, `COFRE_KEY` (64 hex; sem ela a chave fica em `data/cofre.key`).
 
+## Na Vercel
+
+`api/index.js` roda o ACCOUNT na Vercel (as telas saem de `public/`, e o `vercel.json` manda `/api/*` para a função). Lá nada fica em disco: banco, sessões, cache do AudiHoras e documentos do cofre vão para um Redis da Upstash.
+
+1. Importar o repositório na Vercel (sem build).
+2. Storage: criar um banco "Upstash for Redis" e ligar ao projeto. Ele cria `KV_REST_API_URL` e `KV_REST_API_TOKEN`.
+3. Variável `ADMIN_EMAIL`: o primeiro administrador. Opcionais: `COFRE_KEY` (64 hex; sem ela, a chave do cofre fica no próprio Redis) e `AUDIHORAS_API`.
+
+Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio acima de 4,5 MB) e funções em São Paulo (`gru1`), perto do AudiHoras. A credencial do AudiHoras guardada na sessão vai cifrada com uma chave que só existe no cookie de quem entrou.
+
 ## Organização
 
-`nucleo.js` tem as regras e rotas, `server.js` liga o núcleo à rede, ao disco e à criptografia, `audihoras.js` lê o AudiHoras, `public/regras.js` tem os cálculos usados pela tela e pelo servidor. `audihoras-mock.js` e `dados-ficticios.js` servem só ao `npm test`.
+`nucleo.js` tem as regras e rotas, `http-comum.js` o que o servidor local e a Vercel fazem igual, `server.js` liga o núcleo à rede, ao disco e à criptografia, `audihoras.js` lê o AudiHoras, `public/regras.js` tem os cálculos usados pela tela e pelo servidor. `audihoras-mock.js` e `dados-ficticios.js` servem só ao `npm test`.
 
 ## Perfis e telas
 

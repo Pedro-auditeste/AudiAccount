@@ -32,11 +32,12 @@ async function chamar(ah, servico, dados = {}, bruto = false) {
   return typeof j.detalhe === 'string' && /^\s*[[{]/.test(j.detalhe) ? JSON.parse(j.detalhe) : j.detalhe;
 }
 
+// ah.cache: Map no servidor local; na Vercel, um hash no Redis com a mesma cara (get, set, clear assíncronos).
 async function cache(ah, chave, fn, ttl = 5 * 60e3) {
-  const c = ah.cache.get(chave);
+  const c = await ah.cache.get(chave);
   if (c && Date.now() - c.em < ttl) return c.v;
   const v = await fn();
-  ah.cache.set(chave, { v, em: Date.now() });
+  await ah.cache.set(chave, { v, em: Date.now() });
   return v;
 }
 
@@ -125,8 +126,10 @@ function emFila(ah, fn) {
   return p;
 }
 function dados(ah, ano, mes, atualizar) {
-  if (atualizar) ah.cache.clear();
-  return emFila(ah, () => cache(ah, `coleta:${ano}-${mes}`, () => coletar(ah, ano, mes)));
+  return emFila(ah, async () => {
+    if (atualizar) await ah.cache.clear();
+    return cache(ah, `coleta:${ano}-${mes}`, () => coletar(ah, ano, mes));
+  });
 }
 // Foto do colaborador em base64 (só gestor); null quando não tem.
 function foto(ah, id) {

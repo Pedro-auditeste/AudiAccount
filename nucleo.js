@@ -5,7 +5,8 @@
   const falha = (status, msg, extra) => Object.assign(new Error(msg), { status, extra });
   N.falha = falha;
 
-  // d = dependências de cada ambiente: { db, salvar, uuid, gravarDoc, lerDoc, apagarDoc, conectarAH, dadosAH, fotoAH }
+  // d = dependências de cada ambiente: { db, salvar, uuid, sessoes: { ler, gravar, apagar }, gravarDoc, lerDoc, apagarDoc,
+  //   conectarAH, dadosAH, fotoAH, maxDoc }. Sessões e documentos podem ser assíncronos (Redis na Vercel).
   N.criar = d => {
     const { db } = d;
     const agora = () => new Date().toISOString();
@@ -52,14 +53,15 @@
       ultimoAcesso: u.ultimoAcesso, audihoras: u.audihoras || '', vinculo: vinculoDe(u),
     });
 
-    const sessoes = new Map(); // sid -> { uid, visto, ah }
+    // Sessão: { uid, criada, visto, ah }. Fica fora do banco (d.sessoes), porque muda a cada chamada ao AudiHoras.
     const OITO_HORAS = 8 * 3600e3;
-    const tentativas = new Map(); // usuário do AudiHoras -> { n, ate }
-    function sessao(sid) {
-      const s = sid && sessoes.get(sid);
+    const tentativas = () => (db.tentativas ||= {}); // usuário do AudiHoras -> { n, ate }; no banco, vale em qualquer servidor
+    async function sessao(sid) {
+      const s = sid && await d.sessoes.ler(sid);
       if (!s) return null;
       const u = db.usuarios.find(x => x.id === s.uid);
-      if (!u || u.status !== 'ativo' || Date.now() - s.visto > OITO_HORAS) { sessoes.delete(sid); return null; }
+      const derrubada = (s.criada || 0) < (u?.derrubadoEm || 0);
+      if (!u || u.status !== 'ativo' || Date.now() - s.visto > OITO_HORAS || derrubada) { await d.sessoes.apagar(sid); return null; }
       s.visto = Date.now();
       s.u = u;
       return s;
@@ -68,7 +70,7 @@
     // Aceita o e-mail no lugar do usuário (fica o começo dele).
     async function entrar(usuario, senha) {
       usuario = String(usuario || '').trim().toLowerCase().split('@')[0];
-      const t = tentativas.get(usuario);
+      const t = tentativas()[usuario];
       if (t?.ate > Date.now()) throw falha(429, 'Muitas tentativas. Aguarde alguns minutos e tente de novo.');
       let ah;
       try {
@@ -76,13 +78,13 @@
       } catch (e) {
         if (e.status === 401) {
           const n = (t?.n || 0) + 1;
-          tentativas.set(usuario, n >= 5 ? { n: 0, ate: Date.now() + 15 * 60e3 } : { n });
+          tentativas()[usuario] = n >= 5 ? { n: 0, ate: Date.now() + 15 * 60e3 } : { n };
           auditar(null, 'login_falhou', usuario);
           salvar();
         }
         throw e;
       }
-      tentativas.delete(usuario);
+      delete tentativas()[usuario];
       const u = db.usuarios.find(x => vinculoDe(x) === usuario);
       if (!u) {
         auditar(null, 'login_sem_cadastro', usuario);
@@ -93,15 +95,16 @@
       if (u.perfil === 'gerente' && !ah.adm) throw falha(403, 'Para entrar como gerente, seu usuário do AudiHoras precisa ter perfil de gestor.');
       return abrirSessao(u, R.tem(u, 'gerente') && ah.adm ? ah : undefined);
     }
-    function abrirSessao(u, ah) {
+    async function abrirSessao(u, ah) {
       u.ultimoAcesso = agora();
       const sid = d.uuid();
-      sessoes.set(sid, { uid: u.id, visto: Date.now(), ah });
+      await d.sessoes.gravar(sid, { uid: u.id, criada: Date.now(), visto: Date.now(), ah });
       auditar({ u }, 'login', '');
       salvar();
       return sid;
     }
-    const derrubar = uid => { for (const [sid, x] of sessoes) if (x.uid === uid) sessoes.delete(sid); };
+    // Derruba as sessões abertas da pessoa: as criadas antes disto deixam de valer.
+    const derrubar = u => { u.derrubadoEm = Date.now(); };
     function exige(s, ...perfis) {
       if (!perfis.some(p => R.tem(s.u, p))) throw falha(403, 'Você não tem permissão para acessar este recurso.');
     }
@@ -129,16 +132,17 @@
     const texto = (v, max = 500) => String(v || '').trim().slice(0, max);
     const doTime = s => db.registros.filter(r => s.ah?.equipe?.has(r.colabId));
 
-    function guardarArquivo(arquivo) {
+    async function guardarArquivo(arquivo) {
       const m = /^data:([\w/+.-]+);base64,(.+)$/s.exec(arquivo?.dataUrl || '');
       if (!m || !MIMES[m[1]]) throw falha(400, 'O documento precisa ser PDF, PNG, JPG ou WEBP');
       const tamanho = Math.floor(m[2].length * 3 / 4) - (m[2].match(/=*$/)[0].length);
-      if (tamanho > 8e6) throw falha(413, 'Documento grande demais (máx. 8 MB)');
+      const max = d.maxDoc || 8e6;
+      if (tamanho > max) throw falha(413, `Documento grande demais (máx. ${max / 1e6} MB)`);
       const meta = { id: d.uuid(), nome: texto(arquivo.nome || 'documento', 120), mime: m[1], tamanho, em: agora() };
-      d.gravarDoc(meta.id, m[2]);
+      await d.gravarDoc(meta.id, m[2]);
       return meta;
     }
-    function novoRegistro(s, b) {
+    async function novoRegistro(s, b) {
       const ah = exigeAH(s), colabId = Number(b.colabId);
       if (!ah.equipe?.has(colabId)) throw falha(403, 'Profissional fora da sua equipe');
       if (!R.TIPOS[b.tipo]) throw falha(400, 'Tipo inválido');
@@ -150,7 +154,7 @@
         obs: texto(b.obs), status: 'registrada', por: s.u.nome, em: agora(),
         historico: [{ status: 'registrada', obs: '', por: s.u.nome, em: agora() }],
       };
-      if (b.arquivo) r.arquivo = guardarArquivo(b.arquivo);
+      if (b.arquivo) r.arquivo = await guardarArquivo(b.arquivo);
       db.registros.push(r);
       auditar(s, 'ausencia_registrada', `${R.TIPOS[r.tipo]} de ${r.colab} (${r.inicio} a ${r.fim})${sobreposto ? ', sobreposição confirmada' : ''}${r.arquivo ? ', com documento' : ''}`);
       salvar();
@@ -256,11 +260,10 @@
     // ctx = { s, sid, p (partes do caminho), b (corpo), q (parâmetros), saida (cookie ou arquivo) }
     const ID = '([0-9a-f-]{36})';
     const rotas = [
-      ['GET', '/api/me', ({ s }) => ({ usuario: s && { nome: s.u.nome, email: s.u.email, perfil: s.u.perfil, audihoras: vinculoDe(s.u) } }), null],
+      ['GET', '/api/me', ({ s }) => ({ limiteDoc: d.maxDoc || 8e6, usuario: s && { nome: s.u.nome, email: s.u.email, perfil: s.u.perfil, audihoras: vinculoDe(s.u) } }), null],
       ['POST', '/api/login', async ({ b, saida }) => { saida.cookie = await entrar(b.usuario, b.senha); return {}; }, null],
-      ['POST', '/api/logout', ({ s, sid, saida }) => {
-        sessoes.delete(sid);
-        if (s) { auditar(s, 'logout'); salvar(); }
+      ['POST', '/api/logout', ({ s, saida }) => {
+        if (s) { s.fim = true; auditar(s, 'logout'); salvar(); }
         saida.cookie = '';
         return {};
       }, null],
@@ -288,7 +291,7 @@
         if (!mime) return { semFoto: true }; // não é erro: a tela fica com as iniciais
         saida.arquivo = { mime, nome: `foto-${id}`, dados: b64, cache: 'private, max-age=3600' };
       }, ['gerente']],
-      ['POST', '/api/registros', ({ b, s }) => paraGerente(novoRegistro(s, b)), ['gerente']],
+      ['POST', '/api/registros', async ({ b, s }) => paraGerente(await novoRegistro(s, b)), ['gerente']],
       ['POST', `/api/registros/${ID}/status`, ({ b, s, p }) => {
         const r = mudarRegistro(s, p[0], b.status, b.obs);
         return s.u.perfil === 'gerente' ? paraGerente(r) : r;
@@ -309,20 +312,20 @@
 
       // RH
       ['GET', '/api/rh', () => ({ registros: db.registros }), ['rh']],
-      ['POST', `/api/registros/${ID}/documento`, ({ b, s, p }) => {
+      ['POST', `/api/registros/${ID}/documento`, async ({ b, s, p }) => {
         const r = db.registros.find(x => x.id === p[0]);
         if (!r) throw falha(404, 'Registro não encontrado');
         const antigo = r.arquivo;
-        r.arquivo = guardarArquivo(b.arquivo);
-        if (antigo) d.apagarDoc(antigo.id);
+        r.arquivo = await guardarArquivo(b.arquivo);
+        if (antigo) await d.apagarDoc(antigo.id);
         auditar(s, 'documento_anexado', `${R.TIPOS[r.tipo]} de ${r.colab}${antigo ? ' (substituiu o anterior)' : ''}`);
         salvar();
         return r;
       }, ['rh']],
-      ['GET', `/api/arquivo/${ID}`, ({ s, p, saida }) => {
+      ['GET', `/api/arquivo/${ID}`, async ({ s, p, saida }) => {
         const r = db.registros.find(x => x.arquivo?.id === p[0]);
         if (!r) throw falha(404, 'Documento não encontrado');
-        saida.arquivo = { mime: r.arquivo.mime, nome: r.arquivo.nome, dados: d.lerDoc(r.arquivo.id) };
+        saida.arquivo = { mime: r.arquivo.mime, nome: r.arquivo.nome, dados: await d.lerDoc(r.arquivo.id) };
         auditar(s, 'documento_aberto', `${R.TIPOS[r.tipo]} de ${r.colab}: ${r.arquivo.nome}`);
         salvar();
       }, ['rh']],
@@ -342,7 +345,7 @@
         if (u.id === s.u.id && !R.tem(b, 'admin')) throw falha(409, 'Você não pode tirar o seu próprio perfil de administrador.');
         const antes = `${R.PERFIS[u.perfil]}, AudiHoras "${vinculoDe(u)}"`, audihoras = lerVinculo(b.audihoras);
         vinculoLivre({ ...u, audihoras });
-        if (vinculoDe({ ...u, audihoras }) !== vinculoDe(u)) derrubar(u.id);
+        if (vinculoDe({ ...u, audihoras }) !== vinculoDe(u)) derrubar(u);
         Object.assign(u, { nome: texto(b.nome, 100) || u.nome, perfil: b.perfil, audihoras });
         auditar(s, 'usuario_editado', `${u.email}: ${antes} → ${R.PERFIS[u.perfil]}, AudiHoras "${vinculoDe(u)}"`);
         salvar();
@@ -354,7 +357,7 @@
         if (!['ativo', 'bloqueado'].includes(b.status)) throw falha(400, 'Situação inválida');
         if (u.id === s.u.id) throw falha(409, 'Você não pode bloquear a própria conta.');
         u.status = b.status;
-        if (u.status === 'bloqueado') derrubar(u.id);
+        if (u.status === 'bloqueado') derrubar(u);
         auditar(s, b.status === 'ativo' ? 'usuario_reativado' : 'usuario_bloqueado', u.email);
         salvar();
         return publico(u);
@@ -365,6 +368,7 @@
     // Uma "requisição" sem HTTP: devolve { status, json, cookie?, arquivo? } para o ambiente responder.
     async function tratar(metodo, caminho, { sid, corpo = {}, busca = new URLSearchParams() } = {}) {
       const saida = {};
+      let s = null;
       try {
         let achou = false;
         for (const [m, re, fn, perfis] of rotas) {
@@ -372,7 +376,7 @@
           if (!x) continue;
           achou = true;
           if (m !== metodo) continue;
-          const s = sessao(sid);
+          s = await sessao(sid);
           if (perfis && !s) return { status: 401, json: { erro: 'Sua sessão terminou. Entre de novo.' } };
           if (perfis) exige(s, ...perfis);
           const json = await fn({ s, sid, p: x.slice(1), b: corpo || {}, q: busca, saida });
@@ -381,8 +385,11 @@
         return { status: achou ? 405 : 404, json: { erro: 'Rota não encontrada' } };
       } catch (e) {
         if (!e.status) console.error(e);
-        if (e.extra?.expirou) sessoes.delete(sid); // o AudiHoras derrubou a conexão: entra de novo
+        if (e.extra?.expirou && s) s.fim = true; // o AudiHoras derrubou a conexão: entra de novo
         return { status: e.status || 500, json: { erro: e.status ? e.message : 'Erro interno: ' + e.message, ...e.extra } };
+      } finally {
+        // Grava mesmo quando a rota falha: o token do AudiHoras guardado na sessão muda a cada chamada.
+        if (s) await (s.fim ? d.sessoes.apagar(sid) : d.sessoes.gravar(sid, s));
       }
     }
 
