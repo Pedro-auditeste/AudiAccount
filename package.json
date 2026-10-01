@@ -1,0 +1,9 @@
+{
+  "name": "portal-gestao-contas",
+  "private": true,
+  "description": "Portal de Gestão de Contas da Auditeste integrado ao AudiHoras (somente leitura)",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  }
+}

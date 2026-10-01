@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1b221e">
+<title>ACCOUNT · Gestão de Contas e Projetos</title>
+<link rel="icon" href="/simbolo.png">
+<link rel="apple-touch-icon" href="/simbolo.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div id="publico" class="publico" hidden></div>
+
+<div id="app" hidden>
+  <header class="barra">
+    <div class="barra-in">
+      <a class="marca" href="#" aria-label="ACCOUNT, início">
+        <img class="logo" src="/logo.png" alt="ACCOUNT, Gestão de Contas e Projetos">
+        <img class="simbolo" src="/simbolo.png" alt="ACCOUNT">
+      </a>
+      <b class="titulo-movel" id="titulo-movel"></b>
+      <nav class="abas" id="menu" aria-label="Menu principal"></nav>
+      <div class="direita">
+        <span class="selo" id="selo"></span>
+        <button class="perfil-btn" id="perfil-btn" onclick="menuPerfil()" aria-haspopup="menu" aria-expanded="false">
+          <span class="avatar" id="avatar"></span>
+          <span class="quem"><b id="nome-usuario"></b><small id="perfil-usuario"></small></span>
+          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"/></svg>
+        </button>
+        <div class="perfil-menu" id="perfil-menu" role="menu" hidden>
+          <small id="perfil-email"></small>
+          <button role="menuitem" onclick="sair()">Sair do ACCOUNT</button>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="contexto" id="contexto" hidden></div>
+  <main id="conteudo"></main>
+  <footer class="rodape">ACCOUNT · Gestão de Contas e Projetos · Auditeste. Horas lidas do AudiHoras, sem edição; correções são feitas no AudiHoras.</footer>
+  <nav class="abas-movel" id="menu-movel" aria-label="Menu principal"></nav>
+</div>
+
+<div id="tip" hidden></div>
+<div id="toast" role="status" hidden></div>
+<dialog id="dialogo"></dialog>
+
+<script src="/regras.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
