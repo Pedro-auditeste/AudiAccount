@@ -542,12 +542,17 @@ function visao() {
         </aside>
       </div>`;
 }
+// Projeto sem horas na competência: diz o último mês com horas (a janela é de 6 meses), para não parecer erro.
+function semHorasNoMes(pid) {
+  const u = D.lancamentos.filter(l => l.p === pid).reduce((u, l) => (!u || l.a * 12 + l.m > u.a * 12 + u.m ? l : u), null);
+  return ` · ${u ? `últimas em ${MESES[u.m - 1].toLowerCase()}${u.a !== comp.ano ? ` de ${u.a}` : ''}` : 'sem horas nos últimos 6 meses'}`;
+}
 function tileProjeto(p, noProj, maxH) {
   const lp = noProj.filter(l => l.p === p.id), h = soma(lp), fi = fichaDe(p.id);
   const gente = [...agrupar(lp, 'c')].sort((a, b) => b[1] - a[1]).map(([c]) => c);
   return `<a class="tile" href="#fechamento/${p.id}">
     <div class="tile-topo"><div><b>${esc(p.nome)}</b><small>${esc(fi.cliente || 'Cliente não informado')}</small></div>${pillPrj(fi.status)}</div>
-    <div class="tile-num">${hh(h)}<span>em ${MESES[comp.mes - 1].toLowerCase()}</span></div>
+    <div class="tile-num">${hh(h)}<span>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(p.id)}</span></div>
     <div class="mini"><div style="width:${h / maxH * 100}%"></div></div>
     <div class="tile-rodape"><div class="rostos">${gente.slice(0, 4).map(c => foto(c, nomeColab(c))).join('')}${gente.length > 4 ? `<i class="foto mais">+${gente.length - 4}</i>` : ''}</div>
       ${pillFec(fechDe(p.id).status)}</div>
@@ -583,7 +588,7 @@ function cardProjeto(p, lm) {
     <summary>
       <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(fi.cliente || 'Cliente não informado')} · ID AudiHoras ${p.id}</p></div>
         <div class="acoes">${pillPrj(fi.status)} ${pillFec(fechDe(p.id).status)}<span class="seta" aria-hidden="true">⌄</span></div></div>
-      <div class="stats"><span><b>${hh(total)}</b>em ${MESES[comp.mes - 1].toLowerCase()}</span><span><b>${porC.size}</b>com horas</span>
+      <div class="stats"><span><b>${hh(total)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${total ? '' : semHorasNoMes(p.id)}</span><span><b>${porC.size}</b>com horas</span>
         <span><b>${(fi.alocacoes || []).length}</b>alocados</span><span>Vigência <b>${dataBR(fi.inicio)}</b> a <b>${dataBR(fi.fim)}</b></span></div>
     </summary>
     <div class="corpo-prj">
