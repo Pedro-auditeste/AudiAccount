@@ -714,7 +714,8 @@ function historico() {
     ${tabela(['Profissional', 'Tipo', 'Período', { t: 'Dias úteis', num: 1 }, 'Situação', 'Documento', 'Observação', 'Registrado por', ''], linhas)}</section>`;
 }
 function cancelarRegistro(id) {
-  const r = (D?.registros || RHD?.registros || []).find(x => x.id === id);
+  // Acesso total tem as duas listas: a do gerente (só a equipe) e a do RH (todas).
+  const r = [...(D?.registros || []), ...(RHD?.registros || [])].find(x => x.id === id);
   dialogo('Cancelar registro', `<p>${R.TIPOS[r.tipo]} de ${esc(r.colab)} (${periodo(r)}). O registro continua no histórico como cancelado.</p>
     <label class="inteiro">Motivo<textarea name="obs" required maxlength="500"></textarea></label>`, {
     ok: 'Cancelar registro', perigo: true,
@@ -981,9 +982,9 @@ function cofre() {
     dataHora(r.arquivo.em || r.em), `<a class="btn-sec mini-btn" href="/api/arquivo/${r.arquivo.id}" target="_blank" rel="noopener">🔒 Abrir</a>`] }));
   return cab('RH autorizado', 'Cofre de documentos', 'Atestados e comprovantes, restritos ao RH autorizado.')
     + `<div class="kpis">
-        ${kpi('cofre', 'Documentos no cofre', num(docs.length, true), 'Cifrados em disco')}
+        ${kpi('cofre', 'Documentos no cofre', num(docs.length, true), 'Guardados cifrados')}
         ${kpi('alerta', 'Atestados sem documento', num(RHD.registros.filter(r => r.tipo === 'atestado' && !r.arquivo && r.status !== 'cancelada').length, true), 'Anexe em Validação')}
-        ${kpi('disco', 'Espaço usado', `${num(Math.ceil(total / 1024))}<small> KB</small>`, 'Limite de 8 MB por arquivo')}
+        ${kpi('disco', 'Espaço usado', `${num(Math.ceil(total / 1024))}<small> KB</small>`, `Limite de ${LIMITE_DOC / 1e6} MB por arquivo`)}
       </div>
       <div class="aviso azul" style="margin:0 0 18px"><b>● Sigilo médico</b><br>Armazenamento privado e cifrado, sem links públicos. Cada abertura fica registrada na auditoria. Gerentes veem só que o documento existe. Política de retenção e descarte: a definir com RH e LGPD.</div>
       <div class="filtros"><label>Buscar profissional<input type="search" placeholder="Nome" oninput="buscar(this.value)"></label></div>
