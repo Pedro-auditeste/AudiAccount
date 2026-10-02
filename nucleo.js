@@ -121,7 +121,7 @@
     // Carteira e equipe da competência em tela: é contra elas que as ações do gerente são validadas.
     async function dados(ah, ano, mes, atualizar) {
       const x = await d.dadosAH(ah, ano, mes, atualizar);
-      ah.meus = new Map(x.projetos.filter(p => p.natureza === 1).map(p => [p.id, p.nome]));
+      ah.meus = new Map(x.projetos.filter(R.ehProjeto).map(p => [p.id, p.nome]));
       ah.equipe = new Map(x.equipe.map(c => [c.id, c.nome]));
       return x;
     }

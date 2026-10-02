@@ -3,6 +3,9 @@
   R.PERFIS = { gerente: 'Gerente de Contas', rh: 'RH autorizado', financeiro: 'Financeiro autorizado', admin: 'Administrador', total: 'Acesso total' };
   // "Acesso total" tem tudo o que os outros perfis têm (as horas continuam exigindo gestor no AudiHoras).
   R.tem = (u, perfil) => u.perfil === perfil || u.perfil === 'total';
+  // Natureza no AudiHoras: 1 remunerado, 2 não remunerado (interno), 3 benefício (férias, day off, licença).
+  // Projeto é onde se trabalha (1 e 2); benefício entra como hora adicional.
+  R.ehProjeto = p => p.natureza !== 3;
   R.STATUS_USUARIO = { ativo: 'Ativo', bloqueado: 'Bloqueado' };
   R.TIPOS = { falta: 'Falta', combinada: 'Ausência combinada', ferias: 'Férias', atestado: 'Atestado médico' };
   R.STATUS_REG = { registrada: 'Registrada', em_validacao: 'Em validação', validada: 'Validada', cancelada: 'Cancelada' };

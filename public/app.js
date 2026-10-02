@@ -457,7 +457,13 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') menuPerfil(f
 const proj = id => D.projetos.find(p => p.id === id);
 const natureza = id => proj(id)?.natureza;
 const fichaDe = pid => D.fichas[pid] || { status: 'ativo' };
-const meus = (comArquivados = false) => D.projetos.filter(p => p.natureza === 1 && (comArquivados || fichaDe(p.id).status !== 'arquivado'));
+// Carteira em ordem de trabalho: horas no mês e, no empate, nos 6 meses.
+const meus = (comArquivados = false) => {
+  const mes = agrupar(doMes(), 'p'), tudo = agrupar(D.lancamentos, 'p'), h = (m, p) => m.get(p.id) || 0;
+  return D.projetos.filter(p => R.ehProjeto(p) && (comArquivados || fichaDe(p.id).status !== 'arquivado'))
+    .sort((a, b) => h(mes, b) - h(mes, a) || h(tudo, b) - h(tudo, a));
+};
+const clienteDe = p => fichaDe(p.id).cliente || (p.natureza === 2 ? 'Projeto interno (não remunerado)' : 'Cliente não informado');
 const nomeColab = id => D.equipe.find(c => c.id === id)?.nome ?? `Profissional ${id}`;
 const pessoa = (id, negrito) => `<span class="pessoa">${foto(id, nomeColab(id))}${negrito ? `<b>${esc(nomeColab(id))}</b>` : esc(nomeColab(id))}</span>`;
 const doMes = (a = comp.ano, m = comp.mes) => D.lancamentos.filter(l => l.a === a && l.m === m);
@@ -552,7 +558,7 @@ function tileProjeto(p, noProj, maxH) {
   const lp = noProj.filter(l => l.p === p.id), h = soma(lp), fi = fichaDe(p.id);
   const gente = [...agrupar(lp, 'c')].sort((a, b) => b[1] - a[1]).map(([c]) => c);
   return `<a class="tile" href="#fechamento/${p.id}">
-    <div class="tile-topo"><div><b>${esc(p.nome)}</b><small>${esc(fi.cliente || 'Cliente não informado')}</small></div>${pillPrj(fi.status)}</div>
+    <div class="tile-topo"><div><b>${esc(p.nome)}</b><small>${esc(clienteDe(p))}</small></div>${pillPrj(fi.status)}</div>
     <div class="tile-num">${hh(h)}<span>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(p.id)}</span></div>
     <div class="mini"><div style="width:${h / maxH * 100}%"></div></div>
     <div class="tile-rodape"><div class="rostos">${gente.slice(0, 4).map(c => foto(c, nomeColab(c))).join('')}${gente.length > 4 ? `<i class="foto mais">+${gente.length - 4}</i>` : ''}</div>
@@ -564,9 +570,9 @@ function tileProjeto(p, noProj, maxH) {
 function projetos() {
   const lista = meus(true).filter(p => (F.prjArq || fichaDe(p.id).status !== 'arquivado') && (!F.prjStatus || fichaDe(p.id).status === F.prjStatus));
   const lm = doMes();
-  const extras = D.projetos.filter(p => p.natureza !== 1).map(p => {
+  const extras = D.projetos.filter(p => !R.ehProjeto(p)).map(p => {
     const lp = lm.filter(l => l.p === p.id);
-    return lp.length ? [esc(p.nome), p.natureza === 3 ? 'Benefício' : 'Não remunerado', new Set(lp.map(l => l.c)).size, hh(soma(lp))] : null;
+    return lp.length ? [esc(p.nome), 'Benefício', new Set(lp.map(l => l.c)).size, hh(soma(lp))] : null;
   }).filter(Boolean);
   return cab('Carteira', 'Projetos', 'Projetos em que a sua equipe aponta horas no AudiHoras, com a ficha de gestão e a equipe de cada um.')
     + `<div class="filtros">
@@ -576,7 +582,7 @@ function projetos() {
       </div>`
     + somenteLeitura()
     + (lista.map(p => cardProjeto(p, lm)).join('') || `<div class="card vazio">${SEM_DADOS}</div>`)
-    + `<section class="card"><h2>Horas adicionais da equipe</h2><p class="sub">Benefícios e atividades não remuneradas apontadas no AudiHoras (não contam como projeto)</p><br>
+    + `<section class="card"><h2>Horas adicionais da equipe</h2><p class="sub">Benefícios apontados no AudiHoras, como férias, day off e licenças (não contam como projeto)</p><br>
       ${tabela(['Lançamento', 'Categoria', { t: 'Profissionais', num: 1 }, { t: 'Horas', num: 1 }], extras, { vazio: 'Nenhuma hora adicional nesta competência.' })}</section>`;
 }
 function cardProjeto(p, lm) {
@@ -586,7 +592,7 @@ function cardProjeto(p, lm) {
   const equipeP = [...noPeriodo].sort((a, b) => b[1] - a[1]).map(([c, min]) => [pessoa(c), hh(porC.get(c) || 0), hh(min), dataBR(ultimo.get(c))]);
   return `<details class="card projeto" data-busca="${esc(`${p.nome} ${fi.cliente || ''}`.toLowerCase())}" ${ABERTOS.has(p.id) ? 'open' : ''} ontoggle="ABERTOS[this.open ? 'add' : 'delete'](${p.id})">
     <summary>
-      <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(fi.cliente || 'Cliente não informado')} · ID AudiHoras ${p.id}</p></div>
+      <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(clienteDe(p))} · ID AudiHoras ${p.id}</p></div>
         <div class="acoes">${pillPrj(fi.status)} ${pillFec(fechDe(p.id).status)}<span class="seta" aria-hidden="true">⌄</span></div></div>
       <div class="stats"><span><b>${hh(total)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${total ? '' : semHorasNoMes(p.id)}</span><span><b>${porC.size}</b>com horas</span>
         <span><b>${noPeriodo.size}</b>na equipe</span><span>Vigência <b>${dataBR(fi.inicio)}</b> a <b>${dataBR(fi.fim)}</b></span></div>
@@ -633,7 +639,7 @@ function equipe() {
   const membros = F.eqProj ? membrosProjeto(Number(F.eqProj)) : null;
   const linhas = D.equipe.filter(c => !membros || membros.has(c.id)).map(c => {
     const lc = lm.filter(l => l.c === c.id), total = soma(lc);
-    const projs = [...new Set(lc.filter(l => natureza(l.p) === 1).map(l => proj(l.p).nome))];
+    const projs = [...new Set(lc.filter(l => R.ehProjeto(proj(l.p))).map(l => proj(l.p).nome))];
     const aus = regs.filter(r => r.colabId === c.id).map(r => {
       const an = R.analisar(r, lc, natureza, { a: comp.ano, m: comp.mes, ate: HOJE_ISO, feriados: D.feriados });
       return `<div>${tag(r.tipo)} <span class="apagado">${an.dias}d</span><span class="situacao ${an.situacao}">${ICONE_SIT[an.situacao]} ${R.SITUACAO[an.situacao]}</span></div>`;
@@ -880,7 +886,7 @@ function relatorios(arg) {
           ${pid ? barrasH([...agrupar(noEscopo, 'c')].map(([c, min]) => ({ rot: nomeColab(c), min })).sort((a, b) => b.min - a.min))
             : barrasH(escopo.map(p => ({ rot: p.nome, min: soma(noEscopo.filter(l => l.p === p.id)) })).sort((a, b) => b.min - a.min))}</section>
         <section class="card"><h2>Composição das horas</h2><p class="sub">Tudo que ${pid ? 'a equipe do projeto' : 'a equipe'} apontou no AudiHoras</p><br>
-          ${composicao([['Projetos da carteira', porNat(1), 'var(--g-real)'], ['Não remunerado', porNat(2), 'var(--g-prev)'], ['Benefícios', porNat(3), 'var(--g-ben)']])}</section>
+          ${composicao([['Remunerados', porNat(1), 'var(--g-real)'], ['Internos (não remunerados)', porNat(2), 'var(--g-prev)'], ['Benefícios', porNat(3), 'var(--g-ben)']])}</section>
       </div>
       <section class="card"><div class="card-cab"><div><h2>Indicadores financeiros</h2><p class="sub">Receita, custos e margem</p></div>${pill('Pendente do Financeiro', 'fec-conferencia')}</div>
         <p class="dica">Serão exibidos quando a fonte dos dados, a fórmula da margem e as faixas de saúde forem aprovadas pelo Financeiro. Nenhuma classificação financeira é aplicada até lá.</p></section>
@@ -893,7 +899,7 @@ function detalheProjeto(p, lm) {
   const fi = fichaDe(p.id), f = fechDe(p.id), c = calcFech(p.id), lp = lm.filter(l => l.p === p.id);
   const aus = c.linhas.flatMap(l => l.ausencias.map(x => [pessoa(l.c), tag(x.r.tipo), periodo(x.r), x.dias, x.decisao ? R.DECISOES[x.decisao] : 'A decidir']));
   return `<section class="card"><div class="card-cab"><div><div class="eyebrow">Detalhamento</div><h2 style="font-size:18px;margin-top:4px">${esc(p.nome)}</h2>
-      <p class="sub">${esc(fi.cliente || 'Cliente não informado')} · vigência ${dataBR(fi.inicio)} a ${dataBR(fi.fim)}</p></div><div>${pillPrj(fi.status)} ${pillFec(f.status)}</div></div>
+      <p class="sub">${esc(clienteDe(p))} · vigência ${dataBR(fi.inicio)} a ${dataBR(fi.fim)}</p></div><div>${pillPrj(fi.status)} ${pillFec(f.status)}</div></div>
     <div class="stats" style="margin:0 0 14px"><span><b>${hh(soma(lp))}</b>no projeto</span><span><b>${c.linhas.length}</b>profissionais</span><span><b>${aus.length}</b>ausências</span>
       ${f.foto ? `<span>Aprovado por <b>${esc(f.foto.aprovadoPor)}</b> em ${dataHora(f.foto.aprovadoEm)}</span>` : ''}</div>
     ${tabela(['Profissional', { t: 'Horas no projeto', num: 1 }, { t: 'Total no mês', num: 1 }, { t: 'Previsto', num: 1 }, { t: 'Diferença', num: 1 }],

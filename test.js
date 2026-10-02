@@ -92,6 +92,8 @@ async function ponta(base, docCru) {
   const { j: d } = await ger('GET', '/api/dados?ano=2026&mes=9');
   assert.equal(d.equipe.length, 11, 'inativo fica de fora');
   assert.deepEqual(d.projetos.filter(p => p.natureza === 1).map(p => p.id).sort(), [101, 102, 103, 104]);
+  assert.ok(d.projetos.some(p => p.id === 201), 'projeto interno com horas da equipe vem junto');
+  assert.ok(!d.projetos.some(p => p.id === 202), 'projeto sem horas na janela fica de fora');
   assert.equal(d.meses.at(-1).uteis, 21, 'set/2026: 22 dias de semana menos o 7 de setembro');
   assert.equal(d.feriados['2026-09-07'], 'Independência');
   assert.ok(d.lancamentos.every(l => l.d >= 1 && l.min <= 540), 'horas por dia');

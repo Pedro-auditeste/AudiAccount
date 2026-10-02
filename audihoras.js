@@ -123,9 +123,9 @@ async function coletar(ah, ano, mes) {
       const [c, p, a, m, d] = k.split('|').map(Number);
       return { c, p, a, m, d, min };
     });
-    // "Meus projetos" = remunerados (natureza 1) em que a sua equipe apontou horas na janela.
+    // Só os projetos em que a sua equipe apontou horas na janela, de qualquer natureza (a tela separa os benefícios).
     const comHoras = new Set(lancamentos.map(l => l.p));
-    const projetos = [...catalogo.values()].filter(p => p.Natureza !== 1 || comHoras.has(p.Id))
+    const projetos = [...catalogo.values()].filter(p => comHoras.has(p.Id))
       .map(p => ({ id: p.Id, nome: p.Nome, natureza: p.Natureza }));
     return { meses, feriados, projetos, equipe, lancamentos, consultadoEm: new Date().toISOString() };
   } finally {

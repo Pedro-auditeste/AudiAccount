@@ -50,7 +50,7 @@ Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio ac
 * Com o AudiHoras fora do ar, ninguém entra no ACCOUNT (nem o RH).
 * As fotos dos profissionais vêm do AudiHoras (GetColaboradorFoto), só para o gerente da equipe; sem foto, aparecem as iniciais.
 * Só serviços de leitura do AudiHoras passam pelo servidor.
-* Carteira = projetos remunerados com horas da equipe (liderados no AudiHoras). Tudo é validado no servidor, inclusive relatórios e documentos.
+* Carteira = projetos com horas da equipe (liderados no AudiHoras) nos últimos 6 meses, remunerados e internos; benefícios (férias, day off, licenças) entram como horas adicionais. Tudo é validado no servidor, inclusive relatórios e documentos.
 * Ausência não desconta sozinha: o fechamento mostra se ela já está refletida no AudiHoras e o gerente decide deduzir ou não. Aprovação exige todas as decisões e justificativa quando há divergência, e guarda a fotografia das horas. Mudança posterior no AudiHoras gera alerta.
 * Documento médico: cifrado em disco (AES-256-GCM), só o RH (e o Acesso total) abre, cada abertura vai para a auditoria. O gerente vê só que o documento existe.
 * Cancelamento de ausência é lógico (fica no histórico). Tudo relevante vai para a auditoria.
