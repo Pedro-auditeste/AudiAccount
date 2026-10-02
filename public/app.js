@@ -243,6 +243,7 @@ async function carregar(atualizar) {
     ]);
     c.classList.remove('carregando');
     render();
+    ultimaCarga = Date.now();
     if (atualizar) aviso('Dados atualizados do AudiHoras.');
   } catch (e) {
     c.classList.remove('carregando');
@@ -1075,6 +1076,20 @@ function financeiro() {
         <p class="dica" style="margin-bottom:14px">Até essas definições serem aprovadas, o ACCOUNT não calcula nem classifica a saúde financeira dos projetos.</p>
         ${tabela(['Definição necessária', 'Responsável', 'Situação'], pend.map(([d, r]) => [d, r, pill('Pendente', 'fec-conferencia')]))}</section>`;
 }
+
+// ---------- atualização automática ----------
+// A cada 4 horas a tela busca tudo de novo no AudiHoras, como o botão Atualizar. Espera a aba voltar a ficar visível
+// e não interrompe quem está preenchendo um formulário ou escrevendo um comentário.
+const QUATRO_HORAS = 4 * 3600e3;
+let ultimaCarga = Date.now();
+function atualizarSeVelho() {
+  const ocupado = $('#dialogo').open || document.activeElement?.closest?.('#conteudo form, #conteudo textarea');
+  if (!EU || document.hidden || ocupado || Date.now() - ultimaCarga < QUATRO_HORAS) return;
+  ultimaCarga = Date.now(); // conta já na tentativa: com o AudiHoras fora do ar, não insiste a cada minuto
+  carregar(true);
+}
+setInterval(atualizarSeVelho, 60e3);
+document.addEventListener('visibilitychange', atualizarSeVelho);
 
 // ---------- início ----------
 (async () => {
