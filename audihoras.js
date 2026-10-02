@@ -86,24 +86,38 @@ async function coletar(ah, ano, mes) {
     const equipe = colab.dadosColaboradores.filter(c => c.ativo)
       .map(c => ({ id: c.idColaborador, nome: c.nomeColaborador, ultimo: c.dataUltLancamento }));
 
-    // projAtivObs é "Projeto / Atividade / Observação": casa pelo nome de projeto mais longo que servir.
-    const porNome = [...catalogo.values()].sort((a, b) => b.Nome.length - a.Nome.length);
-    const naJanela = new Set(janela.map(j => `${j.ano}-${j.mes}`));
-    const soma = new Map();
+    // Projetos devolve os projetos de quem está em foco: os do gestor não trazem os projetos de cliente da equipe
+    // (visto com um gestor real em 02/10/2026). Então o catálogo junta também os de cada liderado, mês a mês.
+    const apontamentos = [];
     for (const c of equipe) {
+      for (const j of janela) {
+        const ult = new Date(j.ano, j.mes, 0).getDate();
+        const ps = await cache(ah, `proj:${c.id}:${j.ano}-${j.mes}`, async () => {
+          await liderado(ah, c.id);
+          return chamar(ah, 'Projetos', { Dia: ult, Mes: j.mes, Ano: j.ano });
+        }, 3600e3);
+        for (const p of ps) catalogo.set(p.Id, p);
+      }
       for (const a of new Set(janela.map(j => j.ano))) {
         const r = await cache(ah, `pesq:${c.id}:${a}`, async () => {
           await liderado(ah, c.id);
           return chamar(ah, 'PesquisaApontamentos', { Mes: 0, Ano: a, IdProjeto: 0, IdAtividade: 0, Observacao: '' });
         });
-        for (const l of r.lancamentos || []) {
-          if (!naJanela.has(`${l.ano}-${l.mes}`)) continue;
-          const p = porNome.find(p => String(l.projAtivObs).startsWith(p.Nome));
-          if (!p) continue; // projeto fora da sua carteira
-          const k = `${c.id}|${p.Id}|${l.ano}|${l.mes}|${l.dia}`;
-          soma.set(k, (soma.get(k) || 0) + minutos(l.qtdhoras));
-        }
+        for (const l of r.lancamentos || []) apontamentos.push({ c: c.id, l });
       }
+    }
+
+    // projAtivObs é "Projeto / Atividade / Observação" (sem o Id): casa pelo nome de projeto mais longo seguido de "/".
+    const porNome = [...catalogo.values()].sort((a, b) => b.Nome.length - a.Nome.length);
+    const doProjeto = (texto, nome) => texto.startsWith(nome) && /^\s*(\/|$)/.test(texto.slice(nome.length));
+    const naJanela = new Set(janela.map(j => `${j.ano}-${j.mes}`));
+    const soma = new Map();
+    for (const { c, l } of apontamentos) {
+      if (!naJanela.has(`${l.ano}-${l.mes}`)) continue;
+      const p = porNome.find(p => doProjeto(String(l.projAtivObs), p.Nome));
+      if (!p) continue;
+      const k = `${c}|${p.Id}|${l.ano}|${l.mes}|${l.dia}`;
+      soma.set(k, (soma.get(k) || 0) + minutos(l.qtdhoras));
     }
     const lancamentos = [...soma].map(([k, min]) => {
       const [c, p, a, m, d] = k.split('|').map(Number);

@@ -27,7 +27,8 @@ exports.responder = (servico, b) => {
     case 'SetLiderado': sessao.lid = b.idLiderado; return ok('ok');
     // Como no site (ShowImg.js): a foto vem fora do "detalhe", em base64.
     case 'GetColaboradorFoto': sessoes.set(token, sessao); return { rc: true, foto: M.foto(b.IdLiderado), token };
-    case 'Projetos': return ok(b.Dia ? M.PROJETOS : M.PROJETOS.slice(0, 2));
+    // Como no real: a lista é a de quem está em foco. O gestor sozinho só vê os internos, não os projetos de cliente da equipe.
+    case 'Projetos': return ok(M.PROJETOS.filter(p => p.Natureza !== 1 || (colab && (p === colab.projeto || p === colab.extra))));
     case 'GetColaboradores': {
       const hoje = new Date();
       return ok({
