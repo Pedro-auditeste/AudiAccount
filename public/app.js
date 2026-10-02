@@ -456,7 +456,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') menuPerfil(f
 // ---------- dados do gerente ----------
 const proj = id => D.projetos.find(p => p.id === id);
 const natureza = id => proj(id)?.natureza;
-const fichaDe = pid => D.fichas[pid] || { status: 'ativo', alocacoes: [] };
+const fichaDe = pid => D.fichas[pid] || { status: 'ativo' };
 const meus = (comArquivados = false) => D.projetos.filter(p => p.natureza === 1 && (comArquivados || fichaDe(p.id).status !== 'arquivado'));
 const nomeColab = id => D.equipe.find(c => c.id === id)?.nome ?? `Profissional ${id}`;
 const pessoa = (id, negrito) => `<span class="pessoa">${foto(id, nomeColab(id))}${negrito ? `<b>${esc(nomeColab(id))}</b>` : esc(nomeColab(id))}</span>`;
@@ -471,8 +471,9 @@ function uteisAteHoje() {
   const [ini, fim] = R.limites(comp.ano, comp.mes);
   return R.diasUteis(ini, fim < HOJE_ISO ? fim : HOJE_ISO, { feriados: D.feriados }).length;
 }
+// Equipe do projeto: quem apontou horas nele nos últimos 6 meses, direto do AudiHoras (ninguém aloca à mão).
 function membrosProjeto(pid) {
-  return new Set([...D.lancamentos.filter(l => l.p === pid).map(l => l.c), ...(fichaDe(pid).alocacoes || []).map(a => a.colabId)]);
+  return new Set(D.lancamentos.filter(l => l.p === pid).map(l => l.c));
 }
 // Profissionais cujas horas no projeto mudaram no AudiHoras depois da aprovação (RF-FEC-006).
 function alterados(pid) {
@@ -567,7 +568,7 @@ function projetos() {
     const lp = lm.filter(l => l.p === p.id);
     return lp.length ? [esc(p.nome), p.natureza === 3 ? 'Benefício' : 'Não remunerado', new Set(lp.map(l => l.c)).size, hh(soma(lp))] : null;
   }).filter(Boolean);
-  return cab('Carteira', 'Projetos', 'Projetos em que você e a sua equipe estão alocados, com ficha de gestão e alocações.')
+  return cab('Carteira', 'Projetos', 'Projetos em que a sua equipe aponta horas no AudiHoras, com a ficha de gestão e a equipe de cada um.')
     + `<div class="filtros">
         <label>Buscar<input type="search" placeholder="Projeto ou cliente" oninput="buscar(this.value)"></label>
         <label>Status<select onchange="filtro('prjStatus', this.value)"><option value="">Todos</option>${opcoes(R.STATUS_PRJ, F.prjStatus)}</select></label>
@@ -580,16 +581,15 @@ function projetos() {
 }
 function cardProjeto(p, lm) {
   const fi = fichaDe(p.id), lp = lm.filter(l => l.p === p.id), porC = agrupar(lp, 'c'), total = soma(lp);
-  const horas = [...porC].sort((a, b) => b[1] - a[1]).map(([c, min]) =>
-    [pessoa(c), hh(min), `<div class="mini"><div style="width:${total ? min / total * 100 : 0}%"></div></div>`]);
-  const aloc = (fi.alocacoes || []).map(a => [esc(a.colab), dataBR(a.inicio), a.fim ? dataBR(a.fim) : 'Em aberto',
-    `<button class="link perigo" onclick="removerAlocacao(${p.id}, '${a.id}')">Remover</button>`]);
+  const doProj = D.lancamentos.filter(l => l.p === p.id), noPeriodo = agrupar(doProj, 'c'), ultimo = new Map();
+  for (const l of doProj) { const iso = R.iso(l.a, l.m, l.d); if (iso > (ultimo.get(l.c) || '')) ultimo.set(l.c, iso); }
+  const equipeP = [...noPeriodo].sort((a, b) => b[1] - a[1]).map(([c, min]) => [pessoa(c), hh(porC.get(c) || 0), hh(min), dataBR(ultimo.get(c))]);
   return `<details class="card projeto" data-busca="${esc(`${p.nome} ${fi.cliente || ''}`.toLowerCase())}" ${ABERTOS.has(p.id) ? 'open' : ''} ontoggle="ABERTOS[this.open ? 'add' : 'delete'](${p.id})">
     <summary>
       <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(fi.cliente || 'Cliente não informado')} · ID AudiHoras ${p.id}</p></div>
         <div class="acoes">${pillPrj(fi.status)} ${pillFec(fechDe(p.id).status)}<span class="seta" aria-hidden="true">⌄</span></div></div>
       <div class="stats"><span><b>${hh(total)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${total ? '' : semHorasNoMes(p.id)}</span><span><b>${porC.size}</b>com horas</span>
-        <span><b>${(fi.alocacoes || []).length}</b>alocados</span><span>Vigência <b>${dataBR(fi.inicio)}</b> a <b>${dataBR(fi.fim)}</b></span></div>
+        <span><b>${noPeriodo.size}</b>na equipe</span><span>Vigência <b>${dataBR(fi.inicio)}</b> a <b>${dataBR(fi.fim)}</b></span></div>
     </summary>
     <div class="corpo-prj">
       <div class="ficha">
@@ -599,14 +599,12 @@ function cardProjeto(p, lm) {
       </div>
       <div class="acoes" style="margin-bottom:16px">
         <button class="btn-sec" onclick="editarFicha(${p.id})">Editar ficha</button>
-        <button class="btn-sec" onclick="alocarDlg(${p.id})">+ Alocar profissional</button>
         <a class="btn-sec" href="#fechamento/${p.id}">Fechamento →</a>
         <a class="btn-sec" href="#relatorios/${p.id}">Relatório →</a>
       </div>
-      <div class="grid-igual">
-        <div><h3>Horas por profissional (AudiHoras)</h3>${tabela(['Profissional', { t: 'Horas no mês', num: 1 }, 'Participação'], horas, { vazio: 'Sem horas nesta competência.' })}</div>
-        <div><h3>Alocações (ACCOUNT)</h3>${tabela(['Profissional', 'Início', 'Término', ''], aloc, { vazio: 'Nenhuma alocação registrada.' })}</div>
-      </div>
+      <h3>Equipe do projeto (pelos apontamentos no AudiHoras)</h3>
+      ${tabela(['Profissional', { t: `Horas em ${MESES[comp.mes - 1].toLowerCase()}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento'], equipeP,
+        { vazio: 'Ninguém da sua equipe apontou horas neste projeto nos últimos 6 meses.' })}
     </div>
   </details>`;
 }
@@ -625,32 +623,6 @@ function editarFicha(pid) {
       D.fichas[pid] = await api(`/api/projetos/${pid}`, { method: 'POST', body: Object.fromEntries(fd) });
       render(false);
       aviso('Ficha do projeto salva.');
-    },
-  });
-}
-function alocarDlg(pid) {
-  dialogo(`Alocar em ${esc(proj(pid).nome)}`, `
-    <label class="inteiro">Profissional<select name="colabId" required><option value="">Selecione</option>${D.equipe.map(c => `<option value="${c.id}">${esc(c.nome)}</option>`).join('')}</select></label>
-    <label>Início<input type="date" name="inicio" required value="${HOJE_ISO}"></label>
-    <label>Término (opcional)<input type="date" name="fim"></label>
-    <p class="dica">Um profissional pode estar em mais de um projeto.</p>`, {
-    ok: 'Alocar',
-    enviar: async fd => {
-      D.fichas[pid] = await api(`/api/projetos/${pid}/alocacoes`, { method: 'POST', body: Object.fromEntries(fd) });
-      ABERTOS.add(pid);
-      render(false);
-      aviso('Profissional alocado.');
-    },
-  });
-}
-function removerAlocacao(pid, id) {
-  const a = fichaDe(pid).alocacoes.find(x => x.id === id);
-  dialogo('Remover alocação', `<p>Remover ${esc(a.colab)} de ${esc(proj(pid).nome)}? As horas do AudiHoras não mudam.</p>`, {
-    ok: 'Remover', perigo: true,
-    enviar: async () => {
-      D.fichas[pid] = await api(`/api/projetos/${pid}/alocacoes/${id}`, { method: 'DELETE' });
-      render(false);
-      aviso('Alocação removida.');
     },
   });
 }

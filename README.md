@@ -37,7 +37,7 @@ Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio ac
 
 | Perfil | Telas |
 |---|---|
-| Gerente de Contas | Visão Geral, Projetos (ficha, alocações, arquivar), Gestão de Equipes (ausências e histórico), Fechamento Mensal, Relatórios (consolidado e por projeto, PDF) |
+| Gerente de Contas | Visão Geral, Projetos (ficha, equipe automática pelos apontamentos do AudiHoras, arquivar), Gestão de Equipes (ausências e histórico), Fechamento Mensal, Relatórios (consolidado e por projeto, PDF) |
 | RH autorizado | Validação de Ausências (validar, cancelar, anexar documento), Cofre de Documentos |
 | Administrador | Usuários (cadastro, perfil, usuário do AudiHoras, bloqueio), Auditoria |
 | Financeiro autorizado | Situação dos indicadores financeiros (pendentes de definição) |

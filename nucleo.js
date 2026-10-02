@@ -178,7 +178,7 @@
     const paraGerente = r => ({ ...r, arquivo: undefined, documento: !!r.arquivo });
 
     // ---------- Projetos ----------
-    const ficha = pid => (db.projetos[pid] ||= { cliente: '', inicio: '', fim: '', status: 'ativo', referencia: '', obs: '', alocacoes: [] });
+    const ficha = pid => (db.projetos[pid] ||= { cliente: '', inicio: '', fim: '', status: 'ativo', referencia: '', obs: '' });
     function salvarFicha(s, pid, b) {
       const ah = exigeProjeto(s, pid);
       if (!R.STATUS_PRJ[b.status]) throw falha(400, 'Status inválido');
@@ -190,24 +190,6 @@
         referencia: texto(b.referencia, 300), obs: texto(b.obs), atualizadoPor: s.u.nome, atualizadoEm: agora(),
       });
       auditar(s, 'projeto_atualizado', `${ah.meus.get(pid)}: ${R.STATUS_PRJ[b.status]}`);
-      salvar();
-      return f;
-    }
-    function alocar(s, pid, b) {
-      const ah = exigeProjeto(s, pid), colabId = Number(b.colabId);
-      if (!ah.equipe.has(colabId)) throw falha(403, 'Profissional fora da sua equipe');
-      if (!DATA.test(b.inicio) || (b.fim && (!DATA.test(b.fim) || b.fim < b.inicio))) throw falha(400, 'Período de alocação inválido');
-      const a = { id: d.uuid(), colabId, colab: ah.equipe.get(colabId), inicio: b.inicio, fim: b.fim || '' };
-      ficha(pid).alocacoes.push(a);
-      auditar(s, 'alocacao_incluida', `${a.colab} em ${ah.meus.get(pid)} a partir de ${a.inicio}`);
-      salvar();
-      return ficha(pid);
-    }
-    function desalocar(s, pid, id) {
-      const ah = exigeProjeto(s, pid), f = ficha(pid), a = f.alocacoes.find(x => x.id === id);
-      if (!a) throw falha(404, 'Alocação não encontrada');
-      f.alocacoes = f.alocacoes.filter(x => x !== a);
-      auditar(s, 'alocacao_removida', `${a.colab} de ${ah.meus.get(pid)}`);
       salvar();
       return f;
     }
@@ -297,8 +279,6 @@
         return s.u.perfil === 'gerente' ? paraGerente(r) : r;
       }, ['gerente', 'rh']],
       ['POST', '/api/projetos/(\\d+)', ({ b, s, p }) => salvarFicha(s, Number(p[0]), b), ['gerente']],
-      ['POST', '/api/projetos/(\\d+)/alocacoes', ({ b, s, p }) => alocar(s, Number(p[0]), b), ['gerente']],
-      ['DELETE', `/api/projetos/(\\d+)/alocacoes/${ID}`, ({ s, p }) => desalocar(s, Number(p[0]), p[1]), ['gerente']],
       ['POST', '/api/fechamentos', ({ b, s }) => acaoFechamento(s, b), ['gerente']],
       ['POST', '/api/fechamentos/decisao', ({ b, s }) => decidir(s, b), ['gerente']],
       ['POST', '/api/comentarios', ({ b, s }) => {
