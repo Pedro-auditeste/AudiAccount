@@ -23,9 +23,9 @@ const ICONES = {
   chave: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
   disco: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
 };
-const CURTO = { visao: 'Início', projetos: 'Projetos', equipe: 'Equipes', fechamento: 'Fechamento', relatorios: 'Relatórios', validacao: 'Validação', cofre: 'Cofre', usuarios: 'Usuários', auditoria: 'Auditoria', financeiro: 'Financeiro' };
+const CURTO = { visao: 'Início', projetos: 'Contas', equipe: 'Equipes', fechamento: 'Fechamento', relatorios: 'Relatórios', validacao: 'Validação', cofre: 'Cofre', usuarios: 'Usuários', auditoria: 'Auditoria', financeiro: 'Financeiro' };
 const PAGINAS = {
-  visao: ['Visão Geral', visao], projetos: ['Projetos', projetos], equipe: ['Gestão de Equipes', equipe],
+  visao: ['Visão Geral', visao], projetos: ['Contas e projetos', projetos], equipe: ['Gestão de Equipes', equipe],
   fechamento: ['Fechamento Mensal', fechamento], relatorios: ['Relatórios', relatorios],
   validacao: ['Validação de Ausências', validacao], cofre: ['Cofre de Documentos', cofre],
   usuarios: ['Usuários', usuarios], auditoria: ['Auditoria', auditoria], financeiro: ['Financeiro', financeiro],
@@ -48,7 +48,7 @@ const ICONE_SIT = { futuro: '◷', conflito: '⚠', refletida: '✓', sem_aponta
 let EU = null, LIMITE_DOC = 8e6; // a Vercel aceita menos (o servidor diz quanto)
 let D = null, RHD = null, ADM = null, AUD = null, SEM_HORAS = '';
 let comp = { ano: HOJE.getFullYear(), mes: HOJE.getMonth() + 1 };
-const F = { prjStatus: '', prjArq: false, eqProj: '', hColab: '', hTipo: '', hStatus: 'ativos', hDe: '', hAte: '', relTipo: 'consolidado', rhStatus: 'abertas', rhTipo: '', fecProj: 0 };
+const F = { prjStatus: '', prjArq: false, eqProj: '', hColab: '', hTipo: '', hStatus: 'ativos', hDe: '', hAte: '', relTipo: 'consolidado', rhStatus: 'abertas', rhTipo: '', fecProj: 0, conta: '' };
 const ABERTOS = new Set();
 
 // ---------- utilidades ----------
@@ -464,7 +464,57 @@ const meus = (comArquivados = false) => {
   return D.projetos.filter(p => R.ehProjeto(p) && (comArquivados || fichaDe(p.id).status !== 'arquivado'))
     .sort((a, b) => h(mes, b) - h(mes, a) || h(tudo, b) - h(tudo, a));
 };
-const clienteDe = p => fichaDe(p.id).cliente || (p.natureza === 2 ? 'Projeto interno (não remunerado)' : 'Cliente não informado');
+// Conta (cliente) de cada projeto, sem ninguém digitar: vale o cliente da ficha; senão as contas do gerente no
+// AudiHoras (projetos "Gestão de contas - Cliente"); senão o começo do nome ("D4Sign PC1657-05 2026..." é da D4Sign).
+const INTERNO = 'Auditeste (interno)';
+function contaDe(p, comFicha = true) {
+  const fi = comFicha && fichaDe(p.id).cliente;
+  if (fi) return fi;
+  const gc = /^gest[aã]o de contas\s*-\s*(.+)$/i.exec(p.nome);
+  if (gc) return gc[1].trim();
+  const conta = (D.contas || []).find(c => { const curto = c.split(' - ')[0]; return p.nome === curto || p.nome.startsWith(curto + ' '); });
+  if (conta) return conta;
+  if (p.natureza === 2) return INTERNO;
+  return p.nome.split(/\s(?:AL|STAFF)\b|\sPC\d|\s-\s/)[0].trim() || p.nome;
+}
+function clienteDe(p) {
+  const c = contaDe(p);
+  if (p.natureza !== 2) return c;
+  return c === INTERNO ? 'Projeto interno (não remunerado)' : `${c} · interno (não remunerado)`;
+}
+// Projetos agrupados por conta, na ordem em que vieram (a de meus(): mais horas primeiro).
+function porConta(lista) {
+  const m = new Map();
+  for (const p of lista) { const c = contaDe(p); if (!m.has(c)) m.set(c, []); m.get(c).push(p); }
+  return m;
+}
+const opcoesPorConta = (lista, sel, rotulo = p => p.nome) => [...porConta(lista)].map(([c, ps]) =>
+  `<optgroup label="${esc(c)}">${ps.map(p => `<option value="${p.id}" ${String(p.id) === String(sel) ? 'selected' : ''}>${esc(rotulo(p))}</option>`).join('')}</optgroup>`).join('');
+// Relação dos recursos de um grupo de projetos: quem apontou neles nos 6 meses, com horas no mês e no período.
+function recursos(projs) {
+  const ids = new Set(projs.map(p => p.id)), doPer = D.lancamentos.filter(l => ids.has(l.p));
+  const mes = agrupar(doPer.filter(l => l.a === comp.ano && l.m === comp.mes), 'c'), per = agrupar(doPer, 'c');
+  return [...per].sort((a, b) => (mes.get(b[0]) || 0) - (mes.get(a[0]) || 0) || b[1] - a[1]).map(([c, min]) => {
+    const dele = doPer.filter(l => l.c === c);
+    return { c, projetos: [...new Set(dele.map(l => proj(l.p).nome))], mes: mes.get(c) || 0, periodo: min,
+      ultimo: dele.reduce((u, l) => { const iso = R.iso(l.a, l.m, l.d); return iso > u ? iso : u; }, '') };
+  });
+}
+// Planilha da relação dos recursos (CSV que o Excel abre com acentos e colunas certas).
+function exportarRecursos(conta) {
+  const dec = min => (min / 60).toFixed(1).replace('.', ',');
+  const linhas = [['Conta', 'Profissional', 'Projetos', `Horas em ${nomeMes()}`, 'Horas nos últimos 6 meses', 'Último apontamento']];
+  for (const [c, ps] of porConta(meus(true))) {
+    if (conta && c !== conta) continue;
+    for (const r of recursos(ps)) linhas.push([c, nomeColab(r.c), r.projetos.join(', '), dec(r.mes), dec(r.periodo), dataBR(r.ultimo)]);
+  }
+  const csv = '\ufeff' + linhas.map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `Recursos ${conta || 'todas as contas'} ${comp.ano}-${p2(comp.mes)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
 const nomeColab = id => D.equipe.find(c => c.id === id)?.nome ?? `Profissional ${id}`;
 const pessoa = (id, negrito) => `<span class="pessoa">${foto(id, nomeColab(id))}${negrito ? `<b>${esc(nomeColab(id))}</b>` : esc(nomeColab(id))}</span>`;
 const doMes = (a = comp.ano, m = comp.mes) => D.lancamentos.filter(l => l.a === a && l.m === m);
@@ -524,21 +574,26 @@ function visao() {
   const mp = meus(), ids = new Set(mp.map(p => p.id)), noProj = doMes().filter(l => ids.has(l.p));
   const abertos = mp.filter(p => fechDe(p.id).status !== 'aprovado').length;
   const ativos = mp.filter(p => noProj.some(l => l.p === p.id)).length;
+  const contas = porConta(mp), horasConta = ps => soma(noProj.filter(l => ps.some(p => p.id === l.p)));
+  const contasAtivas = [...contas.values()].filter(horasConta).length;
   const alertas = alertasCarteira(mp);
-  const maxH = Math.max(1, ...mp.map(p => soma(noProj.filter(l => l.p === p.id))));
+  // Conferência com o AudiHoras: hora lançada que não casou com projeto nenhum aparece aqui.
+  const soltos = (D.semProjeto || []).filter(x => x.a === comp.ano && x.m === comp.mes);
+  if (soltos.length) alertas.unshift(`<b>${hh(soma(soltos))}</b> lançadas no AudiHoras em ${nomeMes()} não foram ligadas a nenhum projeto (ex.: “${esc(soltos[0].exemplos[0])}”). Clique em Atualizar; se continuar, o projeto não está mais na lista do AudiHoras.`);
+  const maxH = Math.max(1, ...[...contas.values()].map(horasConta));
   return cab('Painel do gerente', `Olá, ${esc(EU.nome.split(/\s+/)[0])}`,
-      `Sua carteira em ${nomeMes()}: ${ativos} projeto(s) com horas e ${abertos} fechamento(s) em aberto.`,
+      `Sua carteira em ${nomeMes()}: ${contasAtivas} conta(s) e ${ativos} projeto(s) com horas, ${abertos} fechamento(s) em aberto.`,
       '<a class="btn" href="#relatorios">↗ Relatório executivo</a>')
     + `<div class="kpis">
-        ${kpi('projetos', 'Projetos ativos', num(ativos, true), 'Na sua carteira')}
+        ${kpi('projetos', 'Contas ativas', num(contasAtivas, true), `${ativos} projeto(s) com horas`)}
         ${kpi('equipe', 'Profissionais alocados', num(new Set(noProj.map(l => l.c)).size, true), `De ${D.equipe.length} na sua equipe`)}
         ${kpi('horas', 'Horas realizadas', `${num(Math.round(soma(noProj) / 60))}<small> h</small>`, 'Origem: AudiHoras')}
         ${kpi('fechamento', 'Fechamentos pendentes', num(abertos, true), abertos ? 'Aguardando conferência' : 'Tudo aprovado')}
       </div>
       <div class="layout-visao">
         <section>
-          <div class="titulo-bloco"><div><h2>Meus projetos</h2><p class="sub">Toque em um projeto para abrir o fechamento</p></div><a class="link" href="#projetos">Ver todos →</a></div>
-          <div class="tiles">${mp.map(p => tileProjeto(p, noProj, maxH)).join('') || `<div class="card vazio">${SEM_DADOS}</div>`}</div>
+          <div class="titulo-bloco"><div><h2>Minhas contas</h2><p class="sub">Toque numa conta para ver a relação dos recursos e os projetos</p></div><a class="link" href="#projetos" onclick="F.conta=''">Ver todas →</a></div>
+          <div class="tiles">${[...contas].map(([c, ps]) => tileConta(c, ps, noProj, maxH)).join('') || `<div class="card vazio">${SEM_DADOS}</div>`}</div>
           <section class="card" style="margin-top:20px"><div class="card-cab"><div><h2>Evolução mensal de horas</h2><p class="sub">Previstas (dias úteis × 8 h) × realizadas · toda a equipe · últimos 6 meses</p></div>
             ${legenda([['Previstas', 'var(--g-prev)'], ['Realizadas', 'var(--g-real)']])}</div>${evolucao()}</section>
         </section>
@@ -551,47 +606,68 @@ function visao() {
       </div>`;
 }
 // Projeto sem horas na competência: diz o último mês com horas (a janela é de 6 meses), para não parecer erro.
-function semHorasNoMes(pid) {
-  const u = D.lancamentos.filter(l => l.p === pid).reduce((u, l) => (!u || l.a * 12 + l.m > u.a * 12 + u.m ? l : u), null);
+function semHorasNoMes(ids) {
+  ids = [].concat(ids);
+  const u = D.lancamentos.filter(l => ids.includes(l.p)).reduce((u, l) => (!u || l.a * 12 + l.m > u.a * 12 + u.m ? l : u), null);
   return ` · ${u ? `últimas em ${MESES[u.m - 1].toLowerCase()}${u.a !== comp.ano ? ` de ${u.a}` : ''}` : 'sem horas nos últimos 6 meses'}`;
 }
-function tileProjeto(p, noProj, maxH) {
-  const lp = noProj.filter(l => l.p === p.id), h = soma(lp), fi = fichaDe(p.id);
-  const gente = [...agrupar(lp, 'c')].sort((a, b) => b[1] - a[1]).map(([c]) => c);
-  return `<a class="tile" href="#fechamento/${p.id}">
-    <div class="tile-topo"><div><b>${esc(p.nome)}</b><small>${esc(clienteDe(p))}</small></div>${pillPrj(fi.status)}</div>
-    <div class="tile-num">${hh(h)}<span>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(p.id)}</span></div>
+function tileConta(c, ps, noProj, maxH) {
+  const ids = ps.map(p => p.id), lp = noProj.filter(l => ids.includes(l.p)), h = soma(lp);
+  const gente = [...agrupar(lp, 'c')].sort((a, b) => b[1] - a[1]).map(([x]) => x);
+  const recursosConta = new Set(D.lancamentos.filter(l => ids.includes(l.p)).map(l => l.c)).size;
+  const abertos = ps.filter(p => fechDe(p.id).status !== 'aprovado').length;
+  return `<a class="tile" href="#projetos" data-conta="${esc(c)}" onclick="F.conta=this.dataset.conta">
+    <div class="tile-topo"><div><b>${esc(c)}</b><small>${ps.length} projeto(s) · ${recursosConta} recurso(s)</small></div>${abertos ? pill(`${abertos} em aberto`, 'fec-conferencia') : pill('Tudo aprovado', 'fec-aprovado')}</div>
+    <div class="tile-num">${hh(h)}<span>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(ids)}</span></div>
     <div class="mini"><div style="width:${h / maxH * 100}%"></div></div>
-    <div class="tile-rodape"><div class="rostos">${gente.slice(0, 4).map(c => foto(c, nomeColab(c))).join('')}${gente.length > 4 ? `<i class="foto mais">+${gente.length - 4}</i>` : ''}</div>
-      ${pillFec(fechDe(p.id).status)}</div>
+    <ul class="tile-projs">${ps.slice(0, 3).map(p => `<li><span>${esc(p.nome)}</span><b>${hh(soma(lp.filter(l => l.p === p.id)))}</b></li>`).join('')}${ps.length > 3 ? `<li class="apagado">e mais ${ps.length - 3} projeto(s)</li>` : ''}</ul>
+    <div class="tile-rodape"><div class="rostos">${gente.slice(0, 5).map(x => foto(x, nomeColab(x))).join('')}${gente.length > 5 ? `<i class="foto mais">+${gente.length - 5}</i>` : ''}</div></div>
   </a>`;
 }
 
 // ---------- Projetos ----------
 function projetos() {
   const lista = meus(true).filter(p => (F.prjArq || fichaDe(p.id).status !== 'arquivado') && (!F.prjStatus || fichaDe(p.id).status === F.prjStatus));
+  const grupos = porConta(lista);
+  if (F.conta && !grupos.has(F.conta)) F.conta = '';
+  const mostrar = F.conta ? [[F.conta, grupos.get(F.conta)]] : [...grupos];
   const lm = doMes();
   const extras = D.projetos.filter(p => !R.ehProjeto(p)).map(p => {
     const lp = lm.filter(l => l.p === p.id);
     return lp.length ? [esc(p.nome), 'Benefício', new Set(lp.map(l => l.c)).size, hh(soma(lp))] : null;
   }).filter(Boolean);
-  return cab('Carteira', 'Projetos', 'Projetos em que a sua equipe aponta horas no AudiHoras, com a ficha de gestão e a equipe de cada um.')
+  return cab('Carteira', 'Contas e projetos', 'Cada conta com a relação dos recursos e os projetos, direto dos apontamentos do AudiHoras.',
+      '<button class="btn" onclick="exportarRecursos(F.conta)">⬇ Exportar recursos (Excel)</button>')
     + `<div class="filtros">
-        <label>Buscar<input type="search" placeholder="Projeto ou cliente" oninput="buscar(this.value)"></label>
+        <label>Conta<select onchange="filtro('conta', this.value)"><option value="">Todas as contas</option>${[...grupos.keys()].map(c => `<option ${c === F.conta ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+        <label>Buscar<input type="search" placeholder="Conta, projeto ou cliente" oninput="buscar(this.value)"></label>
         <label>Status<select onchange="filtro('prjStatus', this.value)"><option value="">Todos</option>${opcoes(R.STATUS_PRJ, F.prjStatus)}</select></label>
         <label class="chk"><input type="checkbox" ${F.prjArq ? 'checked' : ''} onchange="filtro('prjArq', this.checked)"> Mostrar arquivados</label>
       </div>`
     + somenteLeitura()
-    + (lista.map(p => cardProjeto(p, lm)).join('') || `<div class="card vazio">${SEM_DADOS}</div>`)
+    + (mostrar.map(([c, ps]) => secaoConta(c, ps, lm)).join('') || `<div class="card vazio">${SEM_DADOS}</div>`)
     + `<section class="card"><h2>Horas adicionais da equipe</h2><p class="sub">Benefícios apontados no AudiHoras, como férias, day off e licenças (não contam como projeto)</p><br>
       ${tabela(['Lançamento', 'Categoria', { t: 'Profissionais', num: 1 }, { t: 'Horas', num: 1 }], extras, { vazio: 'Nenhuma hora adicional nesta competência.' })}</section>`;
+}
+function secaoConta(c, ps, lm) {
+  const rs = recursos(ps), ids = ps.map(p => p.id), h = soma(lm.filter(l => ids.includes(l.p)));
+  const linhas = rs.map(r => [pessoa(r.c), r.projetos.map(esc).join(', '), hh(r.mes), hh(r.periodo), dataBR(r.ultimo)]);
+  return `<section class="conta" data-busca="${esc(`${c} ${ps.map(p => p.nome).join(' ')}`.toLowerCase())}">
+    <div class="conta-cab"><div><div class="eyebrow">Conta</div><h2>${esc(c)}</h2>
+      <div class="stats"><span><b>${hh(h)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(ids)}</span><span><b>${ps.length}</b>projeto(s)</span><span><b>${rs.length}</b>recurso(s)</span></div></div>
+      <button class="btn-sec no-print" data-conta="${esc(c)}" onclick="exportarRecursos(this.dataset.conta)">⬇ Exportar relação (Excel)</button></div>
+    <section class="card"><h3>Relação dos recursos</h3><p class="sub">Quem apontou horas nos projetos da conta nos últimos 6 meses</p><br>
+      ${tabela(['Profissional', 'Projetos', { t: `Horas em ${MESES[comp.mes - 1].toLowerCase()}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento'], linhas,
+        { vazio: 'Ninguém da sua equipe apontou horas nesta conta nos últimos 6 meses.' })}</section>
+    ${ps.map(p => cardProjeto(p, lm)).join('')}
+  </section>`;
 }
 function cardProjeto(p, lm) {
   const fi = fichaDe(p.id), lp = lm.filter(l => l.p === p.id), porC = agrupar(lp, 'c'), total = soma(lp);
   const doProj = D.lancamentos.filter(l => l.p === p.id), noPeriodo = agrupar(doProj, 'c'), ultimo = new Map();
   for (const l of doProj) { const iso = R.iso(l.a, l.m, l.d); if (iso > (ultimo.get(l.c) || '')) ultimo.set(l.c, iso); }
   const equipeP = [...noPeriodo].sort((a, b) => b[1] - a[1]).map(([c, min]) => [pessoa(c), hh(porC.get(c) || 0), hh(min), dataBR(ultimo.get(c))]);
-  return `<details class="card projeto" data-busca="${esc(`${p.nome} ${fi.cliente || ''}`.toLowerCase())}" ${ABERTOS.has(p.id) ? 'open' : ''} ontoggle="ABERTOS[this.open ? 'add' : 'delete'](${p.id})">
+  return `<details class="card projeto" data-busca="${esc(`${p.nome} ${contaDe(p)}`.toLowerCase())}" ${ABERTOS.has(p.id) ? 'open' : ''} ontoggle="ABERTOS[this.open ? 'add' : 'delete'](${p.id})">
     <summary>
       <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(clienteDe(p))} · ID AudiHoras ${p.id}</p></div>
         <div class="acoes">${pillPrj(fi.status)} ${pillFec(fechDe(p.id).status)}<span class="seta" aria-hidden="true">⌄</span></div></div>
@@ -619,13 +695,13 @@ function editarFicha(pid) {
   const fi = fichaDe(pid);
   dialogo(`Ficha de ${esc(proj(pid).nome)}`, `
     <p>O identificador oficial (ID ${pid}) e as horas vêm do AudiHoras e não mudam aqui.</p>
-    <label class="inteiro">Cliente<input name="cliente" maxlength="120" value="${esc(fi.cliente)}"></label>
+    <label class="inteiro">Cliente (conta)<input name="cliente" maxlength="120" value="${esc(fi.cliente)}" placeholder="${esc(contaDe(proj(pid), false))} (automático pelo AudiHoras)"></label>
     <label>Status<select name="status">${opcoes(R.STATUS_PRJ, fi.status)}</select></label>
     <label>Início da vigência<input type="date" name="inicio" value="${fi.inicio || ''}"></label>
     <label>Fim da vigência<input type="date" name="fim" value="${fi.fim || ''}"></label>
     <label class="inteiro">Referência contratual<input name="referencia" maxlength="300" value="${esc(fi.referencia)}" placeholder="Número do contrato, pedido de compra, regra de faturamento"></label>
     <label class="inteiro">Observação<textarea name="obs" maxlength="500">${esc(fi.obs)}</textarea></label>
-    <p class="dica">Contratos não são anexados. Arquivar preserva fechamentos, vínculos e histórico.</p>`, {
+    <p class="dica">Deixe o cliente vazio para usar a conta automática. Contratos não são anexados. Arquivar preserva fechamentos, vínculos e histórico.</p>`, {
     enviar: async fd => {
       D.fichas[pid] = await api(`/api/projetos/${pid}`, { method: 'POST', body: Object.fromEntries(fd) });
       render(false);
@@ -639,18 +715,19 @@ function equipe() {
   const lm = doMes(), regs = registrosDoMes(), prev = uteisAteHoje() * 480;
   const membros = F.eqProj ? membrosProjeto(Number(F.eqProj)) : null;
   const linhas = D.equipe.filter(c => !membros || membros.has(c.id)).map(c => {
-    const lc = lm.filter(l => l.c === c.id), total = soma(lc);
+    const lc = lm.filter(l => l.c === c.id), solto = soma((D.semProjeto || []).filter(x => x.c === c.id && x.a === comp.ano && x.m === comp.mes));
+    const total = soma(lc) + solto; // o mesmo total do AudiHoras, inclusive o que não casou com projeto
     const projs = [...new Set(lc.filter(l => R.ehProjeto(proj(l.p))).map(l => proj(l.p).nome))];
     const aus = regs.filter(r => r.colabId === c.id).map(r => {
       const an = R.analisar(r, lc, natureza, { a: comp.ano, m: comp.mes, ate: HOJE_ISO, feriados: D.feriados });
       return `<div>${tag(r.tipo)} <span class="apagado">${an.dias}d</span><span class="situacao ${an.situacao}">${ICONE_SIT[an.situacao]} ${R.SITUACAO[an.situacao]}</span></div>`;
     }).join('');
-    return { a: `data-busca="${esc(c.nome.toLowerCase())}"`, c: [pessoa(c.id, true), projs.map(esc).join(', ') || '·', hh(total), hh(prev),
+    return { a: `data-busca="${esc(c.nome.toLowerCase())}"`, c: [pessoa(c.id, true), projs.map(esc).join(', ') || '·', `${hh(total)}${solto ? `<small class="neg">${hh(solto)} sem projeto</small>` : ''}`, hh(prev),
       `<span class="${total < prev ? 'neg' : total > prev ? 'pos' : ''}">${sinal(total - prev)}</span>`, aus || '·', esc(c.ultimo) || '·'] };
   });
   return cab('Pessoas', 'Gestão de Equipes', 'Faltas, férias, ausências combinadas, atestados e histórico da sua equipe.')
     + `<div class="filtros">
-        <label>Projeto<select onchange="filtro('eqProj', this.value)"><option value="">Todos os projetos</option>${meus(true).map(p => `<option value="${p.id}" ${String(p.id) === F.eqProj ? 'selected' : ''}>${esc(p.nome)}</option>`).join('')}</select></label>
+        <label>Projeto<select onchange="filtro('eqProj', this.value)"><option value="">Todos os projetos</option>${opcoesPorConta(meus(true), F.eqProj)}</select></label>
         <label>Buscar profissional<input type="search" placeholder="Nome" oninput="buscar(this.value)"></label>
       </div>
       <section class="card"><div class="card-cab"><div><h2>Equipe em ${nomeMes()}</h2>
@@ -761,7 +838,7 @@ function fechamento(arg) {
   return topo + `
     <section class="card">
       <div class="card-cab"><div><div class="eyebrow">${nomeMes()}</div><h2 style="font-size:20px;margin-top:4px">${esc(p.nome)}</h2><p class="sub">${esc(fichaDe(p.id).cliente || '')}</p></div>
-        <label class="filtros" style="margin:0"><span class="apagado" style="font-size:11.5px">Projeto</span><select onchange="location.hash='#fechamento/'+this.value">${mp.map(x => `<option value="${x.id}" ${x.id === p.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select></label></div>
+        <label class="filtros" style="margin:0"><span class="apagado" style="font-size:11.5px">Projeto</span><select onchange="location.hash='#fechamento/'+this.value">${opcoesPorConta(mp, p.id)}</select></label></div>
       <div class="passos">${passos}</div>
       <div class="somente-leitura" style="margin-bottom:0">🔒 ${consulta()} Achou apontamento incorreto? A correção é feita no AudiHoras; depois&nbsp;<button class="link" onclick="carregar(true)">atualize os dados</button>.</div>
       ${avisos.join('')}
@@ -849,7 +926,7 @@ function relatorios(arg) {
     '', `Fonte das horas: AudiHoras, consulta de ${dataHora(D.consultadoEm)}.`,
   ].join('\n');
   const selTipo = `<select aria-label="Tipo de relatório" onchange="location.hash='#relatorios/'+this.value">
-    <option value="consolidado" ${!pid ? 'selected' : ''}>Consolidado da carteira</option>${mp.map(p => `<option value="${p.id}" ${p.id === pid ? 'selected' : ''}>Projeto: ${esc(p.nome)}</option>`).join('')}</select>`;
+    <option value="consolidado" ${!pid ? 'selected' : ''}>Consolidado da carteira</option>${opcoesPorConta(mp, pid, p => 'Projeto: ' + p.nome)}</select>`;
   return cab('Relatórios gerenciais', titulo, 'Resumo executivo, gráficos e detalhamento, prontos para a reunião.', `${selTipo}<button class="btn" onclick="print()">Exportar PDF</button>`)
     + `<section class="card capa">
         <img src="${LOGO}" alt="ACCOUNT, Gestão de Contas e Projetos">

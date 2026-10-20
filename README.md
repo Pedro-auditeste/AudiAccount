@@ -11,6 +11,8 @@ npm start        # sobe o ACCOUNT, com o AudiHoras de verdade
 npm test         # checagem ponta a ponta (usa um AudiHoras de mentira, só dentro do teste)
 ```
 
+Varredura das telas (todas as telas e ações de cada perfil num navegador, no celular e no PDF): `PUPPETEER=<pasta do puppeteer> CHROME=<chrome.exe> node varredura.js`, ou com `VERCEL=1` para passar pela função da Vercel. Precisa de um puppeteer instalado em outro lugar; não é dependência do projeto.
+
 Os dados ficam em `data/` (`db.json`, e os documentos cifrados em `data/cofre/`).
 
 Abre em http://localhost:3000. Para a rede acessar: `HOST=0.0.0.0 npm start`.
@@ -37,7 +39,7 @@ Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio ac
 
 | Perfil | Telas |
 |---|---|
-| Gerente de Contas | Visão Geral, Projetos (ficha, equipe automática pelos apontamentos do AudiHoras, arquivar), Gestão de Equipes (ausências e histórico), Fechamento Mensal, Relatórios (consolidado e por projeto, PDF) |
+| Gerente de Contas | Visão Geral (por conta), Contas e projetos (relação dos recursos por conta com exportação para Excel, ficha, equipe automática pelos apontamentos do AudiHoras, arquivar), Gestão de Equipes (ausências e histórico), Fechamento Mensal, Relatórios (consolidado e por projeto, PDF) |
 | RH autorizado | Validação de Ausências (validar, cancelar, anexar documento), Cofre de Documentos |
 | Administrador | Usuários (cadastro, perfil, usuário do AudiHoras, bloqueio), Auditoria |
 | Financeiro autorizado | Situação dos indicadores financeiros (pendentes de definição) |
@@ -50,6 +52,8 @@ Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio ac
 * Com o AudiHoras fora do ar, ninguém entra no ACCOUNT (nem o RH).
 * As fotos dos profissionais vêm do AudiHoras (GetColaboradorFoto), só para o gerente da equipe; sem foto, aparecem as iniciais.
 * Só serviços de leitura do AudiHoras passam pelo servidor.
+* Contas: cada projeto cai numa conta sozinho (cliente da ficha; senão as contas do gerente no AudiHoras, os projetos "Gestão de contas - Cliente"; senão o começo do nome, como "D4Sign PC1657..."). A tela Contas traz a relação dos recursos de cada conta e exporta para o Excel.
+* Conferência com o AudiHoras: hora lançada que não casa com projeto nenhum aparece como aviso na Visão Geral e na linha da pessoa em Gestão de Equipes.
 * Carteira = projetos com horas da equipe (liderados no AudiHoras) nos últimos 6 meses, remunerados e internos; benefícios (férias, day off, licenças) entram como horas adicionais. Tudo é validado no servidor, inclusive relatórios e documentos.
 * Ausência não desconta sozinha: o fechamento mostra se ela já está refletida no AudiHoras e o gerente decide deduzir ou não. Aprovação exige todas as decisões e justificativa quando há divergência, e guarda a fotografia das horas. Mudança posterior no AudiHoras gera alerta.
 * Documento médico: cifrado em disco (AES-256-GCM), só o RH (e o Acesso total) abre, cada abertura vai para a auditoria. O gerente vê só que o documento existe.

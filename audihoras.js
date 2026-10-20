@@ -68,7 +68,7 @@ async function coletar(ah, ano, mes) {
   });
   try {
     await liderado(ah, 0);
-    const meses = [], feriados = {}, catalogo = new Map();
+    const meses = [], feriados = {}, catalogo = new Map(), contas = new Set();
     for (const j of janela) {
       const m = await cache(ah, `mes:${j.ano}-${j.mes}`, () => chamar(ah, 'MesAtual', { Mes: j.mes, Ano: j.ano }), 12 * 3600e3);
       let uteis = 0;
@@ -80,7 +80,12 @@ async function coletar(ah, ano, mes) {
       // A lista de projetos depende da data: une a de cada mês para não perder projeto encerrado.
       const ult = new Date(j.ano, j.mes, 0).getDate();
       const ps = await cache(ah, `proj:${j.ano}-${j.mes}`, () => chamar(ah, 'Projetos', { Dia: ult, Mes: j.mes, Ano: j.ano }), 3600e3);
-      for (const p of ps) catalogo.set(p.Id, p);
+      for (const p of ps) {
+        catalogo.set(p.Id, p);
+        // Contas do gerente: os projetos internos dele "Gestão de contas - Cliente".
+        const conta = /^gest[aã]o de contas\s*-\s*(.+)$/i.exec(p.Nome);
+        if (conta) contas.add(conta[1].trim());
+      }
     }
     const colab = await cache(ah, 'equipe', () => chamar(ah, 'GetColaboradores', { MesAnterior: false }));
     const equipe = colab.dadosColaboradores.filter(c => c.ativo)
@@ -111,11 +116,18 @@ async function coletar(ah, ano, mes) {
     const porNome = [...catalogo.values()].sort((a, b) => b.Nome.length - a.Nome.length);
     const doProjeto = (texto, nome) => texto.startsWith(nome) && /^\s*(\/|$)/.test(texto.slice(nome.length));
     const naJanela = new Set(janela.map(j => `${j.ano}-${j.mes}`));
-    const soma = new Map();
+    const soma = new Map(), soltos = new Map(); // soltos: horas que não casaram com projeto nenhum, para avisar na tela
     for (const { c, l } of apontamentos) {
       if (!naJanela.has(`${l.ano}-${l.mes}`)) continue;
       const p = porNome.find(p => doProjeto(String(l.projAtivObs), p.Nome));
-      if (!p) continue;
+      if (!p) {
+        const k = `${c}|${l.ano}|${l.mes}`, x = soltos.get(k) || { c, a: l.ano, m: l.mes, min: 0, exemplos: [] };
+        const nome = String(l.projAtivObs).split('/')[0].trim();
+        x.min += minutos(l.qtdhoras);
+        if (x.exemplos.length < 3 && !x.exemplos.includes(nome)) x.exemplos.push(nome);
+        soltos.set(k, x);
+        continue;
+      }
       const k = `${c}|${p.Id}|${l.ano}|${l.mes}|${l.dia}`;
       soma.set(k, (soma.get(k) || 0) + minutos(l.qtdhoras));
     }
@@ -127,7 +139,7 @@ async function coletar(ah, ano, mes) {
     const comHoras = new Set(lancamentos.map(l => l.p));
     const projetos = [...catalogo.values()].filter(p => comHoras.has(p.Id))
       .map(p => ({ id: p.Id, nome: p.Nome, natureza: p.Natureza }));
-    return { meses, feriados, projetos, equipe, lancamentos, consultadoEm: new Date().toISOString() };
+    return { meses, feriados, projetos, equipe, lancamentos, contas: [...contas], semProjeto: [...soltos.values()], consultadoEm: new Date().toISOString() };
   } finally {
     await liderado(ah, 0).catch(() => {});
   }

@@ -94,6 +94,8 @@ async function ponta(base, docCru) {
   assert.deepEqual(d.projetos.filter(p => p.natureza === 1).map(p => p.id).sort(), [101, 102, 103, 104]);
   assert.ok(d.projetos.some(p => p.id === 201), 'projeto interno com horas da equipe vem junto');
   assert.ok(!d.projetos.some(p => p.id === 202), 'projeto sem horas na janela fica de fora');
+  assert.deepEqual(d.contas.sort(), ['Banco Aurora', 'Saúde Mais'], 'contas do gerente pelos projetos "Gestão de contas"');
+  assert.ok(d.semProjeto.some(x => x.c === 13 && x.exemplos.includes('Projeto que saiu da lista') && x.min === 60), 'hora sem projeto é avisada');
   assert.equal(d.meses.at(-1).uteis, 21, 'set/2026: 22 dias de semana menos o 7 de setembro');
   assert.equal(d.feriados['2026-09-07'], 'Independência');
   assert.ok(d.lancamentos.every(l => l.d >= 1 && l.min <= 540), 'horas por dia');
