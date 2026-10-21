@@ -14,6 +14,7 @@
     // Bancos de antes do login pelo AudiHoras: sem senha, sem convite e sem pedido de nova senha.
     for (const u of db.usuarios) { if (u.status === 'convite') u.status = 'ativo'; delete u.senha; delete u.link; }
     delete db.pedidos;
+    db.contas ||= {}; // ficha de cada conta (cliente): sobre o que é, tecnologias e contatos
 
     function auditar(s, acao, detalhe = '') {
       db.auditoria.push({ em: agora(), por: s ? `${s.u.nome} <${s.u.email}>` : 'sistema', acao, detalhe: String(detalhe).slice(0, 300) });
@@ -146,6 +147,7 @@
       const ah = exigeAH(s), colabId = Number(b.colabId);
       if (!ah.equipe?.has(colabId)) throw falha(403, 'Profissional fora da sua equipe');
       if (!R.TIPOS[b.tipo]) throw falha(400, 'Tipo inválido');
+      if (b.tipo === 'outro' && !texto(b.obs)) throw falha(400, 'Conte o que aconteceu no campo de observação.');
       if (!DATA.test(b.inicio) || !DATA.test(b.fim) || b.inicio > b.fim) throw falha(400, 'Período inválido');
       const sobreposto = db.registros.find(r => r.colabId === colabId && r.status !== 'cancelada' && r.inicio <= b.fim && r.fim >= b.inicio);
       if (sobreposto && !b.confirmar) throw falha(409, 'Há registros sobrepostos neste período. Revise antes de continuar.', { sobreposto: true });
@@ -187,11 +189,43 @@
       const f = ficha(pid);
       Object.assign(f, {
         cliente: texto(b.cliente, 120), inicio: b.inicio || '', fim: b.fim || '', status: b.status,
-        referencia: texto(b.referencia, 300), obs: texto(b.obs), atualizadoPor: s.u.nome, atualizadoEm: agora(),
+        referencia: texto(b.referencia, 300), obs: texto(b.obs), descricao: texto(b.descricao, 2000), atualizadoPor: s.u.nome, atualizadoEm: agora(),
       });
       auditar(s, 'projeto_atualizado', `${ah.meus.get(pid)}: ${R.STATUS_PRJ[b.status]}`);
       salvar();
       return f;
+    }
+
+    // ---------- Contas ----------
+    // Ficha da conta (cliente): sobre o que é, tecnologias e contatos. Vale para todos os gerentes. Conta criada à mão
+    // (cliente que ainda não tem projeto com horas no AudiHoras) aparece só para quem criou, até ganhar projeto.
+    const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    function salvarConta(s, b) {
+      const nome = texto(b.nome, 80), atual = db.contas[nome];
+      if (!nome) throw falha(400, 'Informe o nome da conta');
+      if (b.nova && atual) throw falha(409, 'Já existe uma conta com esse nome');
+      const contatos = (Array.isArray(b.contatos) ? b.contatos : []).slice(0, 20)
+        .map(c => ({ nome: texto(c?.nome, 100), papel: texto(c?.papel, 80), email: texto(c?.email, 120).toLowerCase(), telefone: texto(c?.telefone, 40) }))
+        .filter(c => c.nome || c.email || c.telefone);
+      for (const c of contatos) if (c.email && !EMAIL.test(c.email)) throw falha(400, `E-mail inválido: ${c.email}`);
+      const tecnologias = [...new Set((Array.isArray(b.tecnologias) ? b.tecnologias : String(b.tecnologias || '').split(','))
+        .map(t => texto(t, 40)).filter(Boolean))].slice(0, 30);
+      db.contas[nome] = {
+        ...(atual || { criadaPor: s.u.id, criadaEm: agora(), manual: !!b.nova }),
+        nome, descricao: texto(b.descricao, 2000), tecnologias, contatos, atualizadoPor: s.u.nome, atualizadoEm: agora(),
+      };
+      auditar(s, atual ? 'conta_atualizada' : 'conta_criada', nome);
+      salvar();
+      return db.contas[nome];
+    }
+    function apagarConta(s, nome) {
+      const c = db.contas[nome];
+      if (!c) throw falha(404, 'Conta não encontrada');
+      if (!c.manual || c.criadaPor !== s.u.id) throw falha(403, 'Só dá para excluir uma conta criada por você à mão.');
+      delete db.contas[nome];
+      auditar(s, 'conta_excluida', nome);
+      salvar();
+      return {};
     }
 
     // ---------- Fechamento ----------
@@ -221,6 +255,18 @@
       f.status = t[1];
       f.historico.push({ status: f.status, obs, por: s.u.nome, em: agora() });
       auditar(s, 'fechamento_' + b.acao, `${ah.meus.get(pid)} ${String(m).padStart(2, '0')}/${a}${obs ? ': ' + obs : ''}`);
+      salvar();
+      return f;
+    }
+    // "OK" do gerente em cada profissional: as horas dele no mês foram conferidas.
+    function conferirPessoa(s, b) {
+      const a = Number(b.ano), m = Number(b.mes), pid = Number(b.projetoId), c = Number(b.colabId);
+      const ah = exigeProjeto(s, pid), f = fech(a, m, pid);
+      if (f.status === 'aprovado') throw falha(409, 'Fechamento aprovado: reabra para alterar.');
+      if (!ah.equipe?.has(c)) throw falha(403, 'Profissional fora da sua equipe');
+      f.conferidos ||= {};
+      if (b.ok) f.conferidos[c] = { por: s.u.nome, em: agora() }; else delete f.conferidos[c];
+      auditar(s, 'fechamento_pessoa', `${ah.meus.get(pid)} ${m}/${a}: ${ah.equipe.get(c)} ${b.ok ? 'conferido' : 'desmarcado'}`);
       salvar();
       return f;
     }
@@ -261,6 +307,7 @@
         return {
           ...x, fichas: Object.fromEntries([...ah.meus.keys()].map(pid => [pid, ficha(pid)])),
           fechamentos: pick(db.fechamentos), registros: doTime(s).map(paraGerente),
+          fichasContas: Object.fromEntries(Object.entries(db.contas).filter(([, c]) => !c.manual || c.criadaPor === s.u.id)),
           comentarios: Object.fromEntries(Object.entries(db.comentarios).filter(([k]) => k.startsWith(prefixo)).map(([k, v]) => [k.slice(prefixo.length), v])),
         };
       }, ['gerente']],
@@ -281,10 +328,13 @@
       ['POST', '/api/projetos/(\\d+)', ({ b, s, p }) => salvarFicha(s, Number(p[0]), b), ['gerente']],
       ['POST', '/api/fechamentos', ({ b, s }) => acaoFechamento(s, b), ['gerente']],
       ['POST', '/api/fechamentos/decisao', ({ b, s }) => decidir(s, b), ['gerente']],
+      ['POST', '/api/fechamentos/conferido', ({ b, s }) => conferirPessoa(s, b), ['gerente']],
+      ['POST', '/api/contas', ({ b, s }) => salvarConta(s, b), ['gerente']],
+      ['DELETE', '/api/contas', ({ q, s }) => apagarConta(s, q.get('nome')), ['gerente']],
       ['POST', '/api/comentarios', ({ b, s }) => {
-        const m = /^\d{4}-\d{2}\|(consolidado|\d+)$/.exec(b.chave || '');
+        const m = /^\d{4}-\d{2}\|(consolidado|conta:.{1,80}|\d+)$/.exec(b.chave || '');
         if (!m) throw falha(400, 'Relatório inválido');
-        if (m[1] !== 'consolidado') exigeProjeto(s, Number(m[1]));
+        if (/^\d+$/.test(m[1])) exigeProjeto(s, Number(m[1]));
         db.comentarios[`${s.u.id}|${b.chave}`] = { texto: texto(b.texto, 3000), em: agora() };
         salvar();
         return db.comentarios[`${s.u.id}|${b.chave}`];

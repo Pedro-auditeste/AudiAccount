@@ -53,6 +53,10 @@ Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio ac
 * As fotos dos profissionais vêm do AudiHoras (GetColaboradorFoto), só para o gerente da equipe; sem foto, aparecem as iniciais.
 * Só serviços de leitura do AudiHoras passam pelo servidor.
 * Contas: cada projeto cai numa conta sozinho (cliente da ficha; senão as contas do gerente no AudiHoras, os projetos "Gestão de contas - Cliente"; senão o começo do nome, como "D4Sign PC1657..."). A tela Contas traz a relação dos recursos de cada conta e exporta para o Excel.
+* Ficha da conta: sobre o que é, tecnologias usadas e contatos (nome, papel, e-mail, telefone). Dá para criar uma conta à mão (cliente que ainda não tem projeto com horas); ela aparece para quem criou e recebe os projetos sozinha quando houver horas. A ficha do projeto tem "Sobre o projeto".
+* Equipes: o nome abre as horas da pessoa por projeto e as ausências e férias dela; programação de férias da equipe; tipos de ausência incluem licença médica e "Outro motivo" (obrigatório contar o que aconteceu), com documento ou print.
+* Fechamento: o nome abre as horas da pessoa em cada projeto do mês, e o gerente marca OK em cada profissional conferido.
+* Relatórios: consolidado, por conta ou por projeto; o gerente escolhe quais partes vão para o PDF, e o detalhamento de cada projeto traz gráficos. As cores saem no PDF mesmo com "gráficos de plano de fundo" desligado.
 * Conferência com o AudiHoras: hora lançada que não casa com projeto nenhum aparece como aviso na Visão Geral e na linha da pessoa em Gestão de Equipes.
 * Carteira = projetos com horas da equipe (liderados no AudiHoras) nos últimos 6 meses, remunerados e internos; benefícios (férias, day off, licenças) entram como horas adicionais. Tudo é validado no servidor, inclusive relatórios e documentos.
 * Ausência não desconta sozinha: o fechamento mostra se ela já está refletida no AudiHoras e o gerente decide deduzir ou não. Aprovação exige todas as decisões e justificativa quando há divergência, e guarda a fotografia das horas. Mudança posterior no AudiHoras gera alerta.

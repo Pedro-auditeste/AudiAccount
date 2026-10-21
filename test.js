@@ -117,6 +117,7 @@ async function ponta(base, docCru) {
   const { j: reg } = await ger('POST', '/api/registros', { ...base_, arquivo: { nome: 'atestado.pdf', dataUrl: pdf } });
   assert.equal(reg.documento, true);
   assert.equal(reg.arquivo, undefined, 'gerente não recebe dados do documento');
+  assert.equal((await ger('POST', '/api/registros', { ...base_, tipo: 'outro', inicio: '2026-09-29', fim: '2026-09-29', obs: '' })).st, 400, '"outro motivo" exige contar o que aconteceu');
   const sob = await ger('POST', '/api/registros', { ...base_, tipo: 'falta', fim: '2026-09-21' });
   assert.equal(sob.st, 409);
   assert.equal(sob.j.sobreposto, true);
@@ -141,6 +142,17 @@ async function ponta(base, docCru) {
   if (inicial === 'aprovado') assert.equal((await f('reabrir', 'Preparar o teste')).j.status, 'reaberto');
   if (inicial !== 'conferencia') assert.equal((await f('conferir')).j.status, 'conferencia');
   assert.equal((await f('aprovar')).st, 409, 'precisa decidir as ausências antes de aprovar');
+  const okPessoa = await ger('POST', '/api/fechamentos/conferido', { ano: 2026, mes: 9, projetoId: 101, colabId: 11, ok: true });
+  assert.equal(okPessoa.j.conferidos?.[11]?.por, 'Gestor', 'OK do gerente no profissional');
+  assert.equal((await ger('POST', '/api/fechamentos/conferido', { ano: 2026, mes: 9, projetoId: 101, colabId: 999, ok: true })).st, 403, 'OK só para a equipe');
+  // Fichas de conta: criar uma conta à mão, completar, ver nos dados e excluir.
+  const contaNova = { nome: 'Ailos', nova: true, descricao: 'Cooperativa', tecnologias: 'Java, Selenium, Java', contatos: [{ nome: 'Maria', papel: 'PO', email: 'maria@ailos.coop.br' }, {}] };
+  const { j: ailos } = await ger('POST', '/api/contas', contaNova);
+  assert.deepEqual([ailos.tecnologias, ailos.contatos.length, ailos.manual], [['Java', 'Selenium'], 1, true]);
+  assert.equal((await ger('POST', '/api/contas', contaNova)).st, 409, 'nome de conta único');
+  assert.equal((await ger('POST', '/api/contas', { nome: 'Ailos', contatos: [{ email: 'x@' }] })).st, 400, 'e-mail do contato');
+  assert.equal((await ger('GET', '/api/dados?ano=2026&mes=9')).j.fichasContas.Ailos.descricao, 'Cooperativa');
+  assert.equal((await ger('DELETE', '/api/contas?nome=Ailos')).st, 200);
   const { j: d2 } = await ger('GET', '/api/dados?ano=2026&mes=9');
   const calc = R.fechamento(d2, d2.registros, 101, 2026, 9, d2.fechamentos['2026-09|101']);
   assert.ok(calc.pendentes > 0);

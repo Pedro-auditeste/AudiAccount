@@ -162,6 +162,22 @@ async function gerente(browser, quem, usuario) {
   await checar(page, quem, '#projetos (conta do cartão)');
   for (const c of contas) { await page.evaluate(c => filtro('conta', c), c); await checar(page, quem, `#projetos conta ${c}`); }
   await page.evaluate(() => filtro('conta', ''));
+  // Conta criada à mão (cliente ainda sem projeto), com descrição, tecnologias e contato; depois editar uma conta de verdade.
+  await page.evaluate(() => editarContaDlg('', true));
+  await page.waitForFunction(() => document.querySelector('#dialogo').open);
+  await page.evaluate(() => { const i = document.querySelectorAll('#contatos-edit input'); i[0].value = 'Maria Souza'; i[1].value = 'PO'; i[2].value = 'maria@ailos.coop.br'; i[3].value = '47 3333-0000'; });
+  await dialogo(page, quem, 'nova conta', { nome: 'Ailos', descricao: 'Cooperativa de crédito; testes de regressão.', tecnologias: 'Java, Selenium' });
+  const ailos = await page.evaluate(() => [F.conta, D.fichasContas?.Ailos?.contatos?.length, document.querySelector('details.conta[open] .chips')?.innerText]);
+  if (ailos[0] !== 'Ailos' || ailos[1] !== 1 || !String(ailos[2]).includes('Selenium')) problemas.push(`${quem}: conta nova não ficou certa (${JSON.stringify(ailos)})`);
+  await page.evaluate(c => { F.conta = c; render(false); editarContaDlg(c); }, contas[0]);
+  await dialogo(page, quem, 'editar conta', { descricao: 'Conta principal do gerente.', tecnologias: 'Cypress' });
+  if (!(await page.evaluate(c => D.fichasContas[c]?.descricao, contas[0]))) problemas.push(`${quem}: editar conta não salvou`);
+  await page.evaluate(() => { F.conta = ''; render(false); });
+  await page.evaluate(() => document.querySelectorAll('details.conta').forEach(d => { d.open = true; }));
+  await checar(page, quem, '#projetos todas as contas abertas');
+  await page.evaluate(() => excluirConta('Ailos'));
+  await dialogo(page, quem, 'excluir conta');
+  if (await page.evaluate(() => !!D.fichasContas.Ailos)) problemas.push(`${quem}: excluir conta não funcionou`);
   const csv = await page.evaluate(() => new Promise(ok => {
     const orig = URL.createObjectURL; URL.createObjectURL = b => { b.text().then(ok); URL.createObjectURL = orig; return orig.call(URL, b); };
     exportarRecursos('');
@@ -182,6 +198,12 @@ async function gerente(browser, quem, usuario) {
   await ir(page, quem, '#equipe');
   await page.evaluate(id => filtro('eqProj', String(id)), ids[0]); await checar(page, quem, '#equipe filtro projeto');
   await page.evaluate(() => filtro('eqProj', ''));
+  // Nome da pessoa abre as horas por projeto e as ausências
+  await page.evaluate(() => document.querySelector('#conteudo .abrir').click());
+  if (await page.evaluate(() => document.querySelector('#conteudo tr.linha-extra').hidden)) problemas.push(`${quem}: nome em Equipes não abriu o detalhe`);
+  await checar(page, quem, '#equipe pessoa aberta');
+  await page.evaluate(() => document.querySelector('#conteudo tr.linha-extra button[data-colab]').click()); await sleep(400);
+  if (!(await page.evaluate(() => document.querySelector('#form-registro').colabId.value))) problemas.push(`${quem}: o botão de registrar da pessoa não preencheu o formulário`);
   const colab = await page.evaluate(i => D.equipe[i].id, quem.startsWith('Total') ? 1 : 0);
   const ini = await page.evaluate(() => { const [i] = R.limites(comp.ano, comp.mes); return i.slice(0, 8) + '10'; });
   await page.evaluate((c, ini) => { const f = document.querySelector('form.form'); f.colabId.value = c; f.tipo.value = 'atestado'; f.inicio.value = ini; f.fim.value = ini.slice(0, 8) + '12'; }, colab, ini);
@@ -191,6 +213,21 @@ async function gerente(browser, quem, usuario) {
   await page.evaluate((c, ini) => { const f = document.querySelector('form.form'); f.colabId.value = c; f.tipo.value = 'falta'; f.inicio.value = ini; f.fim.value = ini; }, colab, ini);
   await page.evaluate(() => document.querySelector('form.form .btn').click()); await sleep(1200);
   await dialogo(page, quem, 'registrar sobreposto');
+  // Outro motivo sem contar o que aconteceu: o navegador não deixa enviar; contando, registra. Licença e férias programadas.
+  const outroMes = await page.evaluate(() => R.limites(comp.ano, comp.mes)[0].slice(0, 8));
+  const lanca = async (tipo, ini, fim, obs, doc) => {
+    await page.evaluate((c, tipo, ini, fim, obs) => { const f = document.querySelector('#form-registro'); f.colabId.value = c; f.tipo.value = tipo; f.tipo.dispatchEvent(new Event('change')); f.inicio.value = ini; f.fim.value = fim; f.obs.value = obs; }, colab, tipo, ini, fim, obs);
+    if (doc) await (await page.$('#form-registro input[type=file]')).uploadFile(pdf);
+    await page.evaluate(() => { document.querySelector('#toast').textContent = ''; document.querySelector('#form-registro .btn').click(); }); await sleep(1300);
+    return toast(page);
+  };
+  if (/registrada/.test((await lanca('outro', outroMes + '20', outroMes + '20', '', false))[0])) problemas.push(`${quem}: "Outro motivo" registrou sem contar o que aconteceu`);
+  const [t3] = await lanca('outro', outroMes + '20', outroMes + '20', 'Problema no transporte', false); if (!/registrada/.test(t3)) problemas.push(`${quem} registrar outro motivo: "${t3}"`);
+  const [t4] = await lanca('licenca', outroMes + '24', outroMes + '26', 'Licença médica', true); if (!/registrada/.test(t4)) problemas.push(`${quem} registrar licença: "${t4}"`);
+  const fut = await page.evaluate(() => { const d = new Date(); d.setDate(d.getDate() + 40); return R.iso(d.getFullYear(), d.getMonth() + 1, d.getDate()); });
+  const [t5] = await lanca('ferias', fut, fut, 'Férias programadas', false); if (!/registrada/.test(t5)) problemas.push(`${quem} programar férias: "${t5}"`);
+  if (!(await page.evaluate(() => [...document.querySelectorAll('#conteudo h2')].some(h => h.textContent.includes('Programação de férias') && h.parentElement.querySelector('tbody tr:not(.vazia)')))))
+    problemas.push(`${quem}: férias programadas não apareceram na programação`);
   await page.evaluate(() => filtro('hStatus', '')); await checar(page, quem, '#equipe histórico todas');
   const regId = await page.evaluate(() => D.registros.find(r => r.tipo === 'falta' && r.status !== 'cancelada')?.id);
   if (regId) { await page.evaluate(id => cancelarRegistro(id), regId); await dialogo(page, quem, 'cancelar ausência', { obs: 'Lançada por engano' }); }
@@ -198,6 +235,13 @@ async function gerente(browser, quem, usuario) {
   await ir(page, quem, `#fechamento/${ids[0]}`);
   if (await page.evaluate(id => fechDe(id).status, ids[0]) === 'aprovado') { await page.evaluate(id => acaoFech(id, 'reabrir'), ids[0]); await dialogo(page, quem, 'reabrir', { obs: 'Teste' }); }
   if (await page.evaluate(id => fechDe(id).status !== 'conferencia', ids[0])) { await page.evaluate(id => acaoFech(id, 'conferir'), ids[0]); await sleep(1000); await pronto(page); }
+  // Nome abre as horas da pessoa por projeto; OK marca e a linha continua aberta
+  await page.evaluate(() => document.querySelector('#conteudo .abrir').click());
+  if (await page.evaluate(() => document.querySelector('#conteudo tr.linha-extra').hidden)) problemas.push(`${quem}: nome no Fechamento não abriu as horas`);
+  await page.evaluate(() => document.querySelector('#conteudo button.btn-ok:not(.feito)').click()); await sleep(900); await pronto(page);
+  if (!(await page.evaluate(() => document.querySelector('#conteudo button.btn-ok.feito')))) problemas.push(`${quem}: OK do profissional não marcou`);
+  if (await page.evaluate(() => document.querySelector('#conteudo tr.linha-extra').hidden)) problemas.push(`${quem}: a linha aberta fechou depois do OK`);
+  await checar(page, quem, 'fechamento com OK');
   const nDec = await page.$$eval('#conteudo select[aria-label="Decisão"]', l => l.length);
   for (let i = 0; i < nDec; i++) {
     await page.evaluate(i => { const s = document.querySelectorAll('#conteudo select[aria-label="Decisão"]')[i]; s.value = 'deduzir'; s.dispatchEvent(new Event('change')); }, i);
@@ -212,6 +256,16 @@ async function gerente(browser, quem, usuario) {
   await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.includes('Salvar comentário')).click()); await sleep(900);
   const [t2, c2] = await toast(page); if (c2 === 'erro') problemas.push(`${quem} salvar comentário: "${t2}"`);
   await page.evaluate(() => carregar(true)); await pronto(page); await sleep(500); await checar(page, quem, 'atualizar');
+  // Relatório por conta, com uma parte tirada do PDF
+  await ir(page, quem, '#relatorios/' + encodeURIComponent('conta:' + contas[0]));
+  if (!(await page.evaluate(c => document.querySelector('#conteudo h1').textContent.includes(c), contas[0]))) problemas.push(`${quem}: relatório por conta não abriu`);
+  await page.evaluate(() => alternarParte('financeiro', false));
+  if (!(await page.evaluate(() => document.querySelector('[data-parte="financeiro"].fora-do-pdf')))) problemas.push(`${quem}: tirar parte do PDF não marcou`);
+  await page.emulateMediaType('print');
+  if (await page.evaluate(() => getComputedStyle(document.querySelector('[data-parte="financeiro"]')).display !== 'none')) problemas.push(`${quem}: parte tirada ainda sai no PDF`);
+  if (!(await page.evaluate(() => document.querySelector('[data-parte="detalhe"] svg.grafico')))) problemas.push(`${quem}: detalhamento sem gráfico`);
+  await page.emulateMediaType(null);
+  await page.evaluate(() => alternarParte('financeiro', true));
   // PDF do relatório em A4
   await page.emulateMediaType('print'); await page.setViewport({ width: 794, height: 1123 });
   for (const h of ['#relatorios/consolidado', `#relatorios/${ids[0]}`]) {
