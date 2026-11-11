@@ -14,13 +14,17 @@
     // Contas do gestor: internos com o nome "Gestão de contas - Cliente" (no fim, para não mudar a ordem acima).
     { Id: 203, Nome: 'Gestão de contas - Banco Aurora', Natureza: 2 },
     { Id: 204, Nome: 'Gestão de contas - Saúde Mais', Natureza: 2 },
+    // Projeto encerrado: teve horas até dois meses atrás e parou (a tela principal não pode ficar mostrando).
+    { Id: 105, Nome: 'Logística Sul', Natureza: 1 },
   ];
-  const [AURORA, VAREJO, SAUDE, PRISMA, TREINO, , FERIAS] = M.PROJETOS;
+  const [AURORA, VAREJO, SAUDE, PRISMA, TREINO, , FERIAS, , GC_AURORA, GC_SAUDE, LOGISTICA] = M.PROJETOS;
+  // O gestor aponta nas contas dele (gestão de contas), não em projeto de cliente; o AudiHoras não o lista na equipe.
+  M.GESTOR = { id: 0, nome: 'Gestor Demonstração', projeto: GC_AURORA, extra: GC_SAUDE };
   M.EQUIPE = [
     ['Ana Souza', AURORA], ['Bruno Lima', AURORA], ['Carla Mendes', AURORA], ['Diego Rocha', AURORA, PRISMA],
     ['Elisa Prado', AURORA], ['Fábio Nunes', VAREJO], ['Gabriela Reis', VAREJO], ['Henrique Alves', VAREJO, PRISMA],
-    ['Isabela Costa', SAUDE], ['João Pedro Dias', SAUDE], ['Karen Tavares', PRISMA], ['Lucas Martins', AURORA],
-  ].map(([nome, projeto, extra], i) => ({ id: 11 + i, nome, projeto, extra, ativo: i !== 11 }));
+    ['Isabela Costa', SAUDE], ['João Pedro Dias', SAUDE], ['Karen Tavares', PRISMA, , LOGISTICA], ['Lucas Martins', AURORA],
+  ].map(([nome, projeto, extra, antes], i) => ({ id: 11 + i, nome, projeto, extra, antes, ativo: i !== 11 }));
 
   M.FERIADOS = {
     '2025-1-1': 'Confraternização Universal', '2025-3-3': 'Carnaval', '2025-3-4': 'Carnaval', '2025-4-18': 'Sexta-feira Santa',
@@ -63,8 +67,10 @@
     if (m === 1 + (c.id * 5) % 12 && d <= 15) return [lanc('09:00', '17:00', FERIAS, 'Férias', 'Período de férias')];
     const r = rnd(c.id, a, m, d);
     if (r < 0.03) return []; // esqueceu de apontar
-    const manha = r < 0.12 ? [TREINO, 'Capacitação', 'Trilha de automação'] : [c.projeto, 'Execução de testes', 'Regressão'];
-    const tarde = c.extra && dt.getDay() % 2 ? c.extra : c.projeto;
+    // Quem mudou de projeto: até dois meses atrás estava no anterior (c.antes), que desde então não tem horas.
+    const principal = c.antes && (HOJE.getFullYear() - a) * 12 + HOJE.getMonth() + 1 - m >= 2 ? c.antes : c.projeto;
+    const manha = r < 0.12 ? [TREINO, 'Capacitação', 'Trilha de automação'] : [principal, 'Execução de testes', 'Regressão'];
+    const tarde = c.extra && dt.getDay() % 2 ? c.extra : principal;
     const dia = [lanc('09:00', '12:00', ...manha), lanc('13:00', '18:00', tarde, 'Execução de testes', 'Ciclo da sprint')];
     // Um projeto que não está na lista de ninguém (como quando sai do AudiHoras): a tela tem de avisar.
     if (c.id === 13 && d === 5) dia.push(lanc('18:00', '19:00', { Id: 0, Nome: 'Projeto que saiu da lista' }, 'Reunião', 'Alinhamento'));

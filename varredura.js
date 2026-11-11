@@ -8,6 +8,8 @@ const http = require('node:http'), fs = require('node:fs'), os = require('node:o
 if (!process.env.PUPPETEER || !process.env.CHROME) { console.error('Defina PUPPETEER (pasta do puppeteer) e CHROME (executável).'); process.exit(1); }
 const puppeteer = require(process.env.PUPPETEER);
 const mock = require('./audihoras-mock.js');
+const smtp = require('./smtp-falso.js')(3008); // os e-mails das validações caem aqui
+const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: 3008, EMAIL_FROM: 'account@auditeste.com.br' };
 
 // Dados com a cara dos reais: códigos grandes, nomes longos de projeto e de pessoa.
 const FIC = require('./dados-ficticios.js');
@@ -22,7 +24,7 @@ const PORTA = 3005, PORTA_AH = 3006, BASE = `http://127.0.0.1:${PORTA}`, VERCEL 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varre-'));
 const agora = new Date().toISOString();
 const u = (id, nome, email, perfil) => ({ id: `00000000-0000-4000-8000-00000000000${id}`, nome, email, perfil, audihoras: '', status: 'ativo', criadoEm: agora });
-const banco = JSON.stringify({ usuarios: [
+const banco = JSON.stringify({ config: { emailValidacao: ['financeiro@auditeste.com.br'] }, usuarios: [
   u(1, 'Gestor Teste', 'gestor@auditeste.com.br', 'gerente'), u(2, 'Rita RH', 'rh@auditeste.com.br', 'rh'),
   u(3, 'Admin Teste', 'admin@auditeste.com.br', 'admin'), u(4, 'Fernanda Fin', 'financeiro@auditeste.com.br', 'financeiro'),
   u(5, 'Pedro Total', 'pedro@auditeste.com.br', 'total'),
@@ -60,7 +62,7 @@ if (VERCEL) {
     throw new Error('comando não suportado: ' + op);
   };
   http.createServer((req, res) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => res.end(JSON.stringify({ result: comando(JSON.parse(b)) }))); }).listen(3007, '127.0.0.1');
-  Object.assign(process.env, { KV_REST_API_URL: 'http://127.0.0.1:3007/', KV_REST_API_TOKEN: 'x', AUDIHORAS_API: `http://127.0.0.1:${PORTA_AH}/` });
+  Object.assign(process.env, { ...SMTP, KV_REST_API_URL: 'http://127.0.0.1:3007/', KV_REST_API_TOKEN: 'x', AUDIHORAS_API: `http://127.0.0.1:${PORTA_AH}/` });
   const funcao = require('./api/index.js');
   const TIPO = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png' };
   const s = http.createServer((req, res) => {
@@ -74,7 +76,7 @@ if (VERCEL) {
   noAr = Promise.resolve();
 } else {
   srv = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
-    env: { ...process.env, PORT: PORTA, DATA_DIR: dir, AUDIHORAS_API: `http://127.0.0.1:${PORTA_AH}/` }, stdio: ['ignore', 'pipe', 'inherit'],
+    env: { ...process.env, ...SMTP, PORT: PORTA, DATA_DIR: dir, AUDIHORAS_API: `http://127.0.0.1:${PORTA_AH}/` }, stdio: ['ignore', 'pipe', 'inherit'],
   });
   noAr = new Promise(ok => srv.stdout.on('data', c => String(c).includes('ACCOUNT em') && ok()));
 }
@@ -160,6 +162,15 @@ async function gerente(browser, quem, usuario) {
   await page.evaluate(() => document.querySelector('#conteudo .tile')?.click()); await pronto(page);
   if (!(await page.evaluate(() => F.conta))) problemas.push(`${quem}: tocar no cartão da conta não filtrou a conta`);
   await checar(page, quem, '#projetos (conta do cartão)');
+  // Histórico sob demanda: projeto encerrado (sem horas no mês) fica fora do painel até pedirem
+  await ir(page, quem, '#visao');
+  if (!(await page.evaluate(() => meus(false, true).length - noMes(meus(false, true)).length))) problemas.push(`${quem}: a massa de teste deveria ter projeto sem horas no mês`);
+  if (!(await page.$('#conteudo .nota-historico'))) problemas.push(`${quem}: Visão não avisou do projeto que ficou fora do painel`);
+  const cartoes = await page.$$eval('#conteudo .tile', l => l.length);
+  await page.evaluate(() => filtro('historico', true)); await checar(page, quem, '#visao com histórico');
+  if (await page.$$eval('#conteudo .tile', l => l.length) <= cartoes) problemas.push(`${quem}: pedir o histórico não trouxe a conta sem horas no mês`);
+  await page.evaluate(() => filtro('historico', false));
+  await ir(page, quem, '#projetos');
   for (const c of contas) { await page.evaluate(c => filtro('conta', c), c); await checar(page, quem, `#projetos conta ${c}`); }
   await page.evaluate(() => filtro('conta', ''));
   // Conta criada à mão (cliente ainda sem projeto), com descrição, tecnologias e contato; depois editar uma conta de verdade.
@@ -184,6 +195,37 @@ async function gerente(browser, quem, usuario) {
   }));
   const linhasCsv = csv.trim().split(/\r\n/);
   if (linhasCsv.length < 2 || !linhasCsv[0].includes('Profissional')) problemas.push(`${quem}: exportação de recursos vazia ou sem cabeçalho`);
+  // Projeto criado no ACCOUNT: nome, conta e pessoa buscada pelo nome; no cartão, equipe com papel e checklist.
+  await ir(page, quem, '#projetos');
+  await page.evaluate(() => novoProjetoDlg(''));
+  await page.waitForFunction(() => document.querySelector('#dialogo').open);
+  await page.evaluate(() => { document.querySelector('#np-nome').value = D.equipe[2].nome.split(' ')[0].toLowerCase(); document.querySelector('#np-papel').value = 'QA'; pessoaNoDlg(); });
+  if (await page.$$eval('#np-lista li', l => l.length) !== 1) problemas.push(`${quem}: buscar a pessoa pelo nome não a colocou no projeto novo`);
+  await page.evaluate(() => { document.querySelector('#np-nome').value = 'zzz'; pessoaNoDlg(); });
+  if (!(await page.evaluate(() => document.querySelector('#dialogo .dlg-erro').textContent.includes('Não achei')))) problemas.push(`${quem}: nome que não existe passou sem aviso`);
+  await dialogo(page, quem, 'novo projeto', { nome: 'Projeto da Varredura', cliente: contas[0], descricao: 'Criado pela varredura.' });
+  const novo = await page.evaluate(() => D.projetos.find(p => p.manual && p.nome === 'Projeto da Varredura')?.id);
+  if (!novo) problemas.push(`${quem}: projeto novo não apareceu`);
+  else {
+    const cartao = "[...document.querySelectorAll('details.projeto')].find(d => d.querySelector('h2').textContent === 'Projeto da Varredura')";
+    if (!(await page.evaluate(`!!${cartao}?.open`))) problemas.push(`${quem}: o projeto novo não abriu com as seções dele`);
+    await page.evaluate(`(() => { const f = ${cartao}.querySelector('form.add-pessoa'); f.nome.value = D.equipe[3].nome; f.papel.value = 'Líder técnico'; f.requestSubmit(); })()`); await sleep(900);
+    if (await page.evaluate(id => (D.fichas[id].membros || []).length, novo) !== 2) problemas.push(`${quem}: adicionar pessoa ao projeto pelo nome não funcionou`);
+    await page.evaluate(`(() => { const f = ${cartao}.querySelectorAll('form.add-pessoa')[1]; f.texto.value = 'Kickoff com o cliente'; f.requestSubmit(); })()`); await sleep(800);
+    await page.evaluate(`${cartao}.querySelector('.checklist input[type=checkbox]').click()`); await sleep(800);
+    if (!(await page.evaluate(id => D.fichas[id].checklist?.[0]?.feito, novo))) problemas.push(`${quem}: checklist do projeto não marcou como concluído`);
+    await checar(page, quem, '#projetos projeto novo com equipe e checklist');
+    await page.evaluate(id => membroProjeto(id, D.equipe[3].id, 'Apoio'), ids[0]); await sleep(800); // a mesma pessoa em outro projeto, com outro papel
+    await page.evaluate(id => editarFicha(id), novo);
+    await dialogo(page, quem, 'editar projeto criado', { nome: 'Projeto da Varredura 2', status: 'ativo' });
+    await page.evaluate(id => excluirProjeto(id), novo);
+    await dialogo(page, quem, 'excluir projeto');
+    if (await page.evaluate(id => D.projetos.some(p => p.id === id), novo)) problemas.push(`${quem}: excluir projeto criado não funcionou`);
+  }
+  // Gestão de contas: quem cuida do cliente aparece na conta, mesmo sem estar na equipe de um projeto
+  await page.evaluate(() => { F.conta = ''; render(false); document.querySelectorAll('details.conta').forEach(d => { d.open = true; }); });
+  if (!(await page.$('#conteudo .gestao-conta'))) problemas.push(`${quem}: a gestão da conta não apareceu em nenhuma conta`);
+  await checar(page, quem, '#projetos com a gestão das contas');
   // Projetos: abrir todos, filtros, ficha
   await ir(page, quem, '#projetos');
   await page.evaluate(() => document.querySelectorAll('details.projeto').forEach(d => { d.open = true; }));
@@ -196,6 +238,18 @@ async function gerente(browser, quem, usuario) {
   await ir(page, quem, '#relatorios/consolidado');
   // Equipe: filtros, ausência com documento, sobreposição, cancelar
   await ir(page, quem, '#equipe');
+  // Por projeto: cada projeto com a própria equipe; o nome abre os apontamentos da pessoa só naquele projeto
+  if (await page.$$eval('#conteudo .equipe-projeto', l => l.length) === 0) problemas.push(`${quem}: Equipes por projeto sem nenhum projeto`);
+  await page.evaluate(() => document.querySelector('#conteudo .equipe-projeto .abrir').click());
+  await page.waitForFunction(() => document.querySelector('#conteudo [data-apont] table'), { timeout: 15000 }).catch(() => problemas.push(`${quem}: os apontamentos da pessoa no projeto não chegaram`));
+  await checar(page, quem, '#equipe por projeto, pessoa aberta');
+  const emDois = await page.evaluate(() => {
+    const lm = doMes(), c = D.equipe.find(c => new Set(lm.filter(l => l.c === c.id && R.ehProjeto(proj(l.p))).map(l => l.p)).size > 1);
+    return c ? [...document.querySelectorAll('#conteudo .equipe-projeto')].filter(s => [...s.querySelectorAll('.pessoa b')].some(p => p.textContent === c.nome)).length : -1;
+  });
+  if (emDois < 2) problemas.push(`${quem}: quem atua em dois projetos deveria aparecer nos dois (${emDois})`);
+  await page.evaluate(id => filtro('eqProj', String(id)), ids[0]); await checar(page, quem, '#equipe por projeto, um projeto');
+  await page.evaluate(() => { F.eqProj = ''; filtro('eqVisao', 'pessoa'); }); await checar(page, quem, '#equipe por pessoa');
   await page.evaluate(id => filtro('eqProj', String(id)), ids[0]); await checar(page, quem, '#equipe filtro projeto');
   await page.evaluate(() => filtro('eqProj', ''));
   // Nome da pessoa abre as horas por projeto e as ausências
@@ -229,6 +283,23 @@ async function gerente(browser, quem, usuario) {
   if (!(await page.evaluate(() => [...document.querySelectorAll('#conteudo h2')].some(h => h.textContent.includes('Programação de férias') && h.parentElement.querySelector('tbody tr:not(.vazia)')))))
     problemas.push(`${quem}: férias programadas não apareceram na programação`);
   await page.evaluate(() => filtro('hStatus', '')); await checar(page, quem, '#equipe histórico todas');
+  // Cofre: o gerente baixa o documento da própria equipe
+  const docId = await page.evaluate(() => D.registros.find(r => r.arquivo)?.arquivo.id);
+  if (!docId) problemas.push(`${quem}: o gerente não recebeu o documento da própria equipe`);
+  else if (await page.evaluate(d => fetch('/api/arquivo/' + d).then(r => r.status), docId) !== 200) problemas.push(`${quem}: o gerente não conseguiu baixar o documento da equipe`);
+  await ir(page, quem, '#cofre');
+  if (!(await page.$('#conteudo table tbody tr:not(.vazia)'))) problemas.push(`${quem}: cofre sem os documentos da equipe`);
+  // Ponto e apontamentos: calendário do mês, um dia, outra pessoa pela busca
+  await ir(page, quem, '#ponto');
+  const nDias = await page.$$eval('#conteudo .cal .dia', l => l.length);
+  if (nDias < 28) problemas.push(`${quem}: calendário do ponto com ${nDias} dias`);
+  await page.evaluate(() => document.querySelector('#conteudo .cal .dia.ok').click()); await checar(page, quem, '#ponto um dia');
+  if (!(await page.evaluate(() => F.pontoDia > 0 && document.querySelectorAll('#conteudo table.resp tbody tr:not(.vazia)').length > 0))) problemas.push(`${quem}: escolher o dia não mostrou os apontamentos dele`);
+  await page.evaluate(() => { const i = document.querySelector('#conteudo input[list=pessoas]'); i.value = D.equipe[2].nome; i.dispatchEvent(new Event('change')); });
+  await sleep(300); await pronto(page);
+  if (!(await page.evaluate(() => F.pontoColab === D.equipe[2].id && !F.pontoDia))) problemas.push(`${quem}: a busca pelo nome no ponto não trocou de pessoa`);
+  await checar(page, quem, '#ponto outra pessoa');
+  await ir(page, quem, '#equipe');
   const regId = await page.evaluate(() => D.registros.find(r => r.tipo === 'falta' && r.status !== 'cancelada')?.id);
   if (regId) { await page.evaluate(id => cancelarRegistro(id), regId); await dialogo(page, quem, 'cancelar ausência', { obs: 'Lançada por engano' }); }
   // Fechamento completo do primeiro projeto
@@ -242,6 +313,18 @@ async function gerente(browser, quem, usuario) {
   if (!(await page.evaluate(() => document.querySelector('#conteudo button.btn-ok.feito')))) problemas.push(`${quem}: OK do profissional não marcou`);
   if (await page.evaluate(() => document.querySelector('#conteudo tr.linha-extra').hidden)) problemas.push(`${quem}: a linha aberta fechou depois do OK`);
   await checar(page, quem, 'fechamento com OK');
+  // Finalizar a validação do recurso: registra, gera o PDF e manda o e-mail, uma vez só
+  const enviados = smtp.emails.length;
+  await page.evaluate(() => document.querySelector('#conteudo td button.mini-btn[onclick*="validarDlg"]').click());
+  await dialogo(page, quem, 'finalizar validação');
+  const val = await page.evaluate(id => Object.values(fechDe(id).validacoes || {}).sort((a, b) => a.em.localeCompare(b.em)).map(v => [v.envio.status, v.docId]), ids[0]);
+  if (val.at(-1)?.[0] !== 'enviado' || smtp.emails.length !== enviados + 1) problemas.push(`${quem}: a validação não foi enviada (${JSON.stringify(val)}, ${smtp.emails.length - enviados} e-mail)`);
+  else {
+    const r = await page.evaluate(d => fetch('/api/validacao/' + d).then(async r => [r.status, r.headers.get('content-type'), (await r.arrayBuffer()).byteLength]), val.at(-1)[1]);
+    if (r[0] !== 200 || r[1] !== 'application/pdf' || r[2] < 800) problemas.push(`${quem}: o PDF da validação não abriu (${r})`);
+    if (!smtp.emails.at(-1).includes('To: financeiro@auditeste.com.br')) problemas.push(`${quem}: e-mail da validação foi para o endereço errado`);
+  }
+  if (!(await page.$('#conteudo td .pill.fec-aprovado'))) problemas.push(`${quem}: a linha não mostra a validação como enviada`);
   const nDec = await page.$$eval('#conteudo select[aria-label="Decisão"]', l => l.length);
   for (let i = 0; i < nDec; i++) {
     await page.evaluate(i => { const s = document.querySelectorAll('#conteudo select[aria-label="Decisão"]')[i]; s.value = 'deduzir'; s.dispatchEvent(new Event('change')); }, i);
@@ -276,7 +359,7 @@ async function gerente(browser, quem, usuario) {
   await page.emulateMediaType(null);
   // Celular
   await page.setViewport({ width: 375, height: 800 });
-  for (const h of ['#visao', '#projetos', '#equipe', `#fechamento/${ids[0]}`, '#relatorios/consolidado']) await ir(page, quem + ' (celular)', h);
+  for (const h of ['#visao', '#projetos', '#equipe', '#ponto', `#fechamento/${ids[0]}`, '#relatorios/consolidado']) await ir(page, quem + ' (celular)', h);
   if (await page.evaluate(() => getComputedStyle(document.querySelector('#menu-movel')).display) === 'none') problemas.push(`${quem} (celular): menu de baixo não aparece`);
   await page.setViewport({ width: 1366, height: 900 });
 }
@@ -327,6 +410,15 @@ async function admin(browser, quem, usuario) {
     await page.evaluate(id => statusUsuario(id, 'ativo'), nova); await dialogo(page, quem, 'reativar usuário');
   }
   await ir(page, quem, '#auditoria');
+  // E-mails das validações: destino e teste de envio
+  await ir(page, quem, '#envios');
+  const antes = smtp.emails.length;
+  await page.evaluate(() => { const f = document.querySelector('#conteudo form'); f.emailValidacao.value = 'financeiro@auditeste.com.br, rh@auditeste.com.br'; f.requestSubmit(); }); await sleep(900);
+  if (await page.evaluate(() => CFG.emailValidacao.length) !== 2) problemas.push(`${quem}: o destino das validações não salvou`);
+  await page.evaluate(() => testarEmail(document.querySelector('#conteudo form .btn-sec'))); await sleep(1300);
+  if (smtp.emails.length !== antes + 1) problemas.push(`${quem}: o e-mail de teste não saiu`);
+  if (!(await page.$('#conteudo table tbody tr:not(.vazia)'))) problemas.push(`${quem}: a lista de envios está vazia depois da validação do gerente`);
+  await checar(page, quem, '#envios depois de salvar e testar');
   return page;
 }
 
@@ -349,7 +441,7 @@ async function admin(browser, quem, usuario) {
     problemas.push('VARREDURA PAROU: ' + e.message + ' | ' + String(e.stack).split(/\n/).slice(1, 4).join(' / '));
   } finally {
     await browser.close();
-    srv.kill(); ah.close();
+    srv.kill(); ah.close(); smtp.close();
     fs.rmSync(dir, { recursive: true, force: true });
     const porQuem = {};
     for (const f of feitos) { const [q] = f.split(' | '); porQuem[q] = (porQuem[q] || 0) + 1; }

@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const AH = require('../audihoras.js');
 const Nucleo = require('../nucleo.js');
 const C = require('../http-comum.js');
+const Envio = require('../envio.js');
 
 const API = process.env.AUDIHORAS_API || 'http://152.249.241.111:72/api/';
 const P = 'account:';
@@ -106,6 +107,8 @@ module.exports = async (req, res) => {
         conectarAH: (usuario, senha) => AH.conectar(API, usuario, senha),
         dadosAH: AH.dados,
         fotoAH: AH.foto,
+        apontamentosAH: AH.apontamentos,
+        enviarEmail: Envio.transporte(process.env),
       });
       // Banco vazio: o primeiro administrador é o do ADMIN_EMAIL (configurado no projeto da Vercel).
       if (!db.usuarios.length && process.env.ADMIN_EMAIL) nucleo.garantirAdmin(process.env.ADMIN_EMAIL);

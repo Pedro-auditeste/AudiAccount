@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const AH = require('./audihoras.js');
 const Nucleo = require('./nucleo.js');
 const C = require('./http-comum.js');
+const Envio = require('./envio.js');
 
 const PORT = +process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -41,6 +42,8 @@ const nucleo = Nucleo.criar({
   conectarAH: (usuario, senha) => AH.conectar(API, usuario, senha),
   dadosAH: AH.dados,
   fotoAH: AH.foto,
+  apontamentosAH: AH.apontamentos,
+  enviarEmail: Envio.transporte(process.env),
 });
 
 const primeiro = nucleo.garantirAdmin(process.env.ADMIN_EMAIL);

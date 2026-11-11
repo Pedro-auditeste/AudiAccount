@@ -9,7 +9,8 @@ const AH = require('./audihoras.js');
 const Nucleo = require('./nucleo.js');
 const mock = require('./audihoras-mock.js');
 
-const PORTA_LOCAL = 3999, PORTA_AH = 3998, PORTA_REDIS = 3997, PORTA_VERCEL = 3996;
+const PORTA_LOCAL = 3999, PORTA_AH = 3998, PORTA_REDIS = 3997, PORTA_VERCEL = 3996, PORTA_SMTP = 3995;
+const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: PORTA_SMTP, EMAIL_FROM: 'account@auditeste.com.br' };
 const AH_URL = `http://127.0.0.1:${PORTA_AH}/`, ADMIN_EMAIL = 'admin@auditeste.com.br';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'account-'));
 const servidor = (porta, fn) => http.createServer(fn).listen(porta, '127.0.0.1');
@@ -20,6 +21,9 @@ const ahFalso = servidor(PORTA_AH, async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(mock.responder(req.url.slice(1), await corpoJson(req))));
 });
+
+// Servidor de e-mail de mentira (smtp-falso.js): guarda cada mensagem que chega para o teste olhar.
+const smtpFalso = require('./smtp-falso.js')(PORTA_SMTP), { emails } = smtpFalso;
 
 // Redis de mentira com a API REST da Upstash: só os comandos que o api/index.js usa.
 const redis = new Map(), expira = new Map();
@@ -50,13 +54,13 @@ const redisFalso = servidor(PORTA_REDIS, async (req, res) => {
 
 // Servidor local, como no npm start.
 const srv = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
-  env: { ...process.env, PORT: PORTA_LOCAL, DATA_DIR: dir, AUDIHORAS_API: AH_URL, ADMIN_EMAIL },
+  env: { ...process.env, ...SMTP, PORT: PORTA_LOCAL, DATA_DIR: dir, AUDIHORAS_API: AH_URL, ADMIN_EMAIL },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 const localNoAr = new Promise(ok => srv.stdout.on('data', c => String(c).includes('ACCOUNT em') && ok()));
 
 // Jeito Vercel: a mesma função que a Vercel chama, atrás de um servidor http qualquer.
-Object.assign(process.env, { KV_REST_API_URL: `http://127.0.0.1:${PORTA_REDIS}/`, KV_REST_API_TOKEN: 'teste', AUDIHORAS_API: AH_URL, ADMIN_EMAIL });
+Object.assign(process.env, { ...SMTP, KV_REST_API_URL: `http://127.0.0.1:${PORTA_REDIS}/`, KV_REST_API_TOKEN: 'teste', AUDIHORAS_API: AH_URL, ADMIN_EMAIL });
 const vercel = servidor(PORTA_VERCEL, require('./api/index.js'));
 
 // Um "navegador" por pessoa, cada um com o seu cookie.
@@ -90,8 +94,11 @@ async function ponta(base, docCru) {
 
   // Dados do AudiHoras
   const { j: d } = await ger('GET', '/api/dados?ano=2026&mes=9');
-  assert.equal(d.equipe.length, 11, 'inativo fica de fora');
-  assert.deepEqual(d.projetos.filter(p => p.natureza === 1).map(p => p.id).sort(), [101, 102, 103, 104]);
+  assert.equal(d.equipe.length, 12, 'inativo fica de fora; o gestor entra');
+  const eu = d.equipe[0];
+  assert.ok(eu.gestor && eu.id < 0 && eu.nome === 'Gestor Demonstração', 'o gestor também é uma pessoa da carteira');
+  assert.ok(d.lancamentos.some(l => l.c === eu.id && l.p === 203), 'horas do gestor na gestão de contas do cliente');
+  assert.deepEqual(d.projetos.filter(p => p.natureza === 1).map(p => p.id).sort(), [101, 102, 103, 104, 105]);
   assert.ok(d.projetos.some(p => p.id === 201), 'projeto interno com horas da equipe vem junto');
   assert.ok(!d.projetos.some(p => p.id === 202), 'projeto sem horas na janela fica de fora');
   assert.deepEqual(d.contas.sort(), ['Banco Aurora', 'Saúde Mais'], 'contas do gerente pelos projetos "Gestão de contas"');
@@ -108,6 +115,16 @@ async function ponta(base, docCru) {
   assert.equal((await ger('GET', '/api/foto/12')).j.semFoto, true, 'quem não tem foto fica com as iniciais');
   assert.equal((await ger('GET', '/api/foto/999')).st, 404, 'foto só de quem é da equipe');
 
+  // Apontamentos um a um (o que antes pedia abrir o AudiHoras)
+  const { j: ap } = await ger('GET', '/api/apontamentos?colab=11&ano=2026&mes=9');
+  assert.deepEqual(Object.keys(ap.lancamentos[0]).sort(), ['atividade', 'd', 'final', 'inicio', 'min', 'obs', 'p', 'projeto']);
+  assert.equal(ap.lancamentos.reduce((t, l) => t + l.min, 0), d.lancamentos.filter(l => l.c === 11 && l.a === 2026 && l.m === 9).reduce((t, l) => t + l.min, 0), 'mesmas horas da coleta');
+  assert.ok(ap.lancamentos.some(l => l.projeto === 'Banco Aurora' && l.atividade === 'Execução de testes' && l.obs === 'Ciclo da sprint' && l.inicio === '13:00'));
+  assert.ok((await ger('GET', `/api/apontamentos?colab=${eu.id}&ano=2026&mes=9`)).j.lancamentos.some(l => l.p === 204), 'apontamentos do próprio gestor');
+  const solto = d.semProjeto.find(x => x.c === 13);
+  assert.ok((await ger('GET', `/api/apontamentos?colab=13&ano=${solto.a}&mes=${solto.m}`)).j.lancamentos.some(l => l.p === null && l.projeto === 'Projeto que saiu da lista'), 'o que não casou com projeto aparece com o nome que veio');
+  assert.equal((await ger('GET', '/api/apontamentos?colab=999&ano=2026&mes=9')).st, 404, 'apontamentos só de quem é da equipe');
+
   // Ausências
   const pdf = 'data:application/pdf;base64,' + Buffer.from('%PDF-1.4 atestado').toString('base64');
   const base_ = { colabId: 11, tipo: 'atestado', inicio: '2026-09-21', fim: '2026-09-22', obs: 'teste' };
@@ -116,7 +133,7 @@ async function ponta(base, docCru) {
   assert.equal((await ger('POST', '/api/registros', { ...base_, arquivo: { nome: 'x.html', dataUrl: 'data:text/html;base64,PGI+' } })).st, 400, 'tipo de arquivo');
   const { j: reg } = await ger('POST', '/api/registros', { ...base_, arquivo: { nome: 'atestado.pdf', dataUrl: pdf } });
   assert.equal(reg.documento, true);
-  assert.equal(reg.arquivo, undefined, 'gerente não recebe dados do documento');
+  assert.equal(reg.arquivo.nome, 'atestado.pdf', 'gerente com a permissão do cofre vê o documento da própria equipe');
   assert.equal((await ger('POST', '/api/registros', { ...base_, tipo: 'outro', inicio: '2026-09-29', fim: '2026-09-29', obs: '' })).st, 400, '"outro motivo" exige contar o que aconteceu');
   const sob = await ger('POST', '/api/registros', { ...base_, tipo: 'falta', fim: '2026-09-21' });
   assert.equal(sob.st, 409);
@@ -130,8 +147,19 @@ async function ponta(base, docCru) {
   const { j: todos } = await rh('GET', '/api/rh');
   const doc = todos.registros.find(r => r.id === reg.id).arquivo;
   assert.equal((await rh('GET', '/api/foto/11')).st, 403, 'RH não lê fotos do AudiHoras');
-  assert.equal((await ger('GET', '/api/arquivo/' + doc.id)).st, 403, 'gerente não abre documento médico');
   assert.equal((await rh('GET', '/api/arquivo/' + doc.id)).j.toString(), '%PDF-1.4 atestado');
+  // Cofre para o gerente: baixa os documentos da própria equipe, até o administrador tirar a permissão.
+  assert.equal((await ger('GET', '/api/arquivo/' + doc.id)).j.toString(), '%PDF-1.4 atestado', 'gerente baixa documento da equipe dele');
+  assert.equal((await adm('GET', '/api/arquivo/' + doc.id)).st, 403, 'administrador não abre o cofre');
+  const gerente = (await adm('GET', '/api/usuarios')).j.usuarios.find(u => u.email === 'gerente@auditeste.com.br');
+  assert.equal(gerente.cofre, true);
+  await adm('POST', `/api/usuarios/${gerente.id}`, { perfil: 'gerente', audihoras: 'gestor', cofre: 'nao' });
+  assert.equal((await ger('GET', '/api/arquivo/' + doc.id)).st, 403, 'sem a permissão, o gerente não abre');
+  assert.equal((await ger('GET', '/api/me')).j.usuario.cofre, false);
+  const semCofre = (await ger('GET', '/api/dados?ano=2026&mes=9')).j.registros.find(r => r.id === reg.id);
+  assert.ok(semCofre.documento && semCofre.arquivo === undefined, 'e volta a ver só que o documento existe');
+  await adm('POST', `/api/usuarios/${gerente.id}`, { perfil: 'gerente', audihoras: 'gestor', cofre: 'sim' });
+  assert.equal((await ger('GET', '/api/me')).j.usuario.cofre, true, 'a sessão continua e a permissão volta');
   assert.ok(!docCru(doc.id).includes('%PDF'), 'documento guardado cifrado');
   assert.equal((await rh('POST', `/api/registros/${reg.id}/status`, { status: 'validada' })).j.status, 'validada');
 
@@ -145,6 +173,56 @@ async function ponta(base, docCru) {
   const okPessoa = await ger('POST', '/api/fechamentos/conferido', { ano: 2026, mes: 9, projetoId: 101, colabId: 11, ok: true });
   assert.equal(okPessoa.j.conferidos?.[11]?.por, 'Gestor', 'OK do gerente no profissional');
   assert.equal((await ger('POST', '/api/fechamentos/conferido', { ano: 2026, mes: 9, projetoId: 101, colabId: 999, ok: true })).st, 403, 'OK só para a equipe');
+  // Validação do recurso: depois do OK, finalizar gera o PDF e manda o e-mail, sem repetir sozinho.
+  const validar = corpo => ger('POST', '/api/fechamentos/validar', { ano: 2026, mes: 9, projetoId: 101, ...corpo });
+  const antes = emails.length;
+  assert.equal((await validar({ colabIds: [12] })).st, 409, 'sem OK não finaliza');
+  assert.equal((await validar({ colabIds: [] })).st, 400);
+  const { j: semDestino } = await validar({ colabIds: [11] });
+  assert.deepEqual([semDestino.validacoes[11].envio.status, emails.length], ['pendente', antes], 'sem destino configurado, o registro fica e o e-mail espera');
+  const pdf1 = await ger('GET', '/api/validacao/' + semDestino.validacoes[11].docId);
+  assert.equal(pdf1.j.subarray(0, 5).toString(), '%PDF-', 'documento da validação');
+  assert.equal((await rh('GET', '/api/validacao/' + semDestino.validacoes[11].docId)).st, 403);
+  assert.equal((await ger('GET', '/api/config')).st, 403, 'só o administrador configura o destino');
+  assert.equal((await adm('POST', '/api/config', { emailValidacao: 'financeiro@auditeste.com.br; torto' })).st, 400);
+  const { j: cfg } = await adm('POST', '/api/config', { emailValidacao: 'Financeiro@auditeste.com.br; rh@auditeste.com.br' });
+  assert.deepEqual([cfg.emailValidacao, cfg.envioLigado, cfg.remetente], [['financeiro@auditeste.com.br', 'rh@auditeste.com.br'], true, 'account@auditeste.com.br']);
+  assert.equal((await adm('POST', '/api/config/teste')).st, 200);
+  assert.ok(emails.at(-1).includes('To: financeiro@auditeste.com.br, rh@auditeste.com.br') && emails.length === antes + 1, 'e-mail de teste');
+  const { j: enviado } = await validar({ colabIds: [11] });
+  assert.equal(enviado.validacoes[11].envio.status, 'enviado', 'o que estava esperando vai sem pedir "reenviar"');
+  assert.ok(emails.length === antes + 2 && emails.at(-1).includes('filename="Validacao-2026-09-Banco-Aurora.pdf"') && emails.at(-1).includes('JVBERi0xLjQ'), 'e-mail com o PDF anexo');
+  assert.ok(Buffer.from(/base64\r\n\r\n([\s\S]+?)\r\n--/.exec(emails.at(-1))[1], 'base64').toString().includes('o recurso foi devidamente validado e está tudo OK'));
+  assert.equal((await ger('GET', '/api/validacao/' + semDestino.validacoes[11].docId)).st, 404, 'o documento antigo deu lugar ao novo');
+  const repetido = await validar({ colabIds: [11] });
+  assert.ok(repetido.st === 409 && repetido.j.jaEnviado && emails.length === antes + 2, 'não manda duas vezes sem querer');
+  assert.equal((await validar({ colabIds: [11], reenviar: true })).st, 200);
+  assert.equal(emails.length, antes + 3, 'reenvio só quando pedido');
+  assert.equal((await ger('POST', '/api/fechamentos/conferido', { ano: 2026, mes: 9, projetoId: 101, colabId: 11, ok: false })).st, 409, 'OK de recurso já validado não sai');
+  assert.equal((await adm('GET', '/api/config')).j.envios[0].status, 'enviado');
+
+  // Projetos: criar no ACCOUNT, equipe escolhida à mão (com papel), checklist e ligação com o projeto do AudiHoras.
+  assert.equal((await ger('POST', '/api/projetos', { nome: 'Banco aurora' })).st, 409, 'nome que já existe na carteira');
+  assert.equal((await ger('POST', '/api/projetos', { nome: 'Ailos Fase 2', membros: [{ colabId: 999 }] })).st, 403, 'pessoa fora da equipe');
+  const { j: novoP } = await ger('POST', '/api/projetos', { nome: 'Ailos Fase 2', cliente: 'Ailos', descricao: 'Regressão', membros: [{ colabId: 11, papel: 'QA' }, { colabId: 11, papel: 'repetida' }, { colabId: eu.id, papel: 'Gestor de contas' }] });
+  assert.deepEqual([novoP.id > 9e12, novoP.ficha.membros], [true, [{ c: 11, papel: 'QA' }, { c: eu.id, papel: 'Gestor de contas' }]]);
+  const comNovo = (await ger('GET', '/api/dados?ano=2026&mes=9')).j;
+  assert.ok(comNovo.projetos.some(p => p.id === novoP.id && p.manual && p.nome === 'Ailos Fase 2') && comNovo.fichas[novoP.id].cliente === 'Ailos');
+  const item = (await ger('POST', `/api/projetos/${novoP.id}/checklist`, { acao: 'criar', texto: 'Kickoff com o cliente' })).j.checklist[0];
+  assert.equal((await ger('POST', `/api/projetos/${novoP.id}/checklist`, { acao: 'marcar', id: item.id, feito: true })).j.checklist[0].feitoPor, 'Gestor');
+  assert.equal((await ger('POST', `/api/projetos/${novoP.id}/checklist`, { acao: 'criar', texto: ' ' })).st, 400);
+  assert.equal((await ger('POST', `/api/projetos/${novoP.id}/checklist`, { acao: 'apagar', id: 'x' })).st, 404);
+  assert.deepEqual((await ger('POST', '/api/projetos/102/membros', { colabId: 12, papel: 'Líder técnico' })).j.membros, [{ c: 12, papel: 'Líder técnico' }], 'a mesma pessoa em outro projeto, com outro papel');
+  assert.deepEqual((await ger('POST', '/api/projetos/102/membros', { colabId: 12, remover: true })).j.membros, []);
+  assert.equal((await ger('POST', '/api/projetos/102/membros', { colabId: 999 })).st, 403);
+  assert.equal((await ger('DELETE', '/api/projetos/102')).st, 403, 'projeto do AudiHoras não se exclui');
+  const { j: ligado } = await ger('POST', `/api/projetos/${novoP.id}/ligar`, { alvo: 104 });
+  assert.deepEqual([ligado.id, ligado.ficha.membros.length, ligado.ficha.checklist[0].feito, ligado.ficha.descricao], [104, 2, true, 'Regressão'], 'equipe, checklist e ficha passam para o projeto do AudiHoras');
+  assert.ok(!(await ger('GET', '/api/dados?ano=2026&mes=9')).j.projetos.some(p => p.id === novoP.id), 'e o criado à mão some');
+  const { j: outroP } = await ger('POST', '/api/projetos', { nome: 'Projeto passageiro' });
+  assert.equal((await ger('POST', `/api/projetos/${outroP.id}`, { status: 'ativo', nome: 'Saúde Mais' })).st, 409, 'renomear para um nome que já existe');
+  assert.equal((await ger('DELETE', `/api/projetos/${outroP.id}`)).st, 200);
+
   // Fichas de conta: criar uma conta à mão, completar, ver nos dados e excluir.
   const contaNova = { nome: 'Ailos', nova: true, descricao: 'Cooperativa', tecnologias: 'Java, Selenium, Java', contatos: [{ nome: 'Maria', papel: 'PO', email: 'maria@ailos.coop.br' }, {}] };
   const { j: ailos } = await ger('POST', '/api/contas', contaNova);
@@ -174,8 +252,8 @@ async function ponta(base, docCru) {
   assert.equal((await ger('GET', '/api/usuarios')).st, 403);
   // Acesso total: tudo o que os outros perfis têm; as horas continuam exigindo gestor no AudiHoras.
   assert.equal((await adm('GET', '/api/rh')).st, 403);
-  const eu = (await adm('GET', '/api/usuarios')).j.usuarios.find(u => u.email === ADMIN_EMAIL);
-  assert.equal((await adm('POST', `/api/usuarios/${eu.id}`, { perfil: 'total' })).st, 200, 'administrador passa a si mesmo para acesso total');
+  const admin = (await adm('GET', '/api/usuarios')).j.usuarios.find(u => u.email === ADMIN_EMAIL);
+  assert.equal((await adm('POST', `/api/usuarios/${admin.id}`, { perfil: 'total' })).st, 200, 'administrador passa a si mesmo para acesso total');
   assert.equal((await adm('GET', '/api/rh')).st, 200);
   const semHoras = await adm('GET', '/api/dados?ano=2026&mes=9');
   assert.ok(semHoras.st === 200 && semHoras.j.semHoras && !semHoras.j.lancamentos, 'sem gestor no AudiHoras, sem horas');
@@ -198,7 +276,7 @@ async function ponta(base, docCru) {
   await adm('POST', `/api/usuarios/${novo.id}`, { perfil: 'gerente', audihoras: '' });
   assert.equal((await nova('POST', '/api/login', { usuario: 'nova', senha: 'demo' })).st, 403, 'gerente precisa ser gestor no AudiHoras');
   const acoes = (await adm('GET', '/api/auditoria')).j.map(a => a.acao);
-  for (const a of ['documento_aberto', 'fechamento_aprovar', 'usuario_bloqueado', 'ausencia_registrada']) assert.ok(acoes.includes(a), 'auditoria: ' + a);
+  for (const a of ['documento_aberto', 'fechamento_aprovar', 'usuario_bloqueado', 'ausencia_registrada', 'validacao_enviado', 'validacao_pendente', 'projeto_criado', 'projeto_ligado', 'config_email']) assert.ok(acoes.includes(a), 'auditoria: ' + a);
 
   for (let i = 0; i < 5; i++) await anon('POST', '/api/login', { usuario: 'rh', senha: 'x' });
   assert.equal((await anon('POST', '/api/login', { usuario: 'rh', senha: 'demo' })).st, 429, 'bloqueio por tentativas');
@@ -221,6 +299,17 @@ async function ponta(base, docCru) {
   assert.deepEqual(velho.usuarios.map(u => [u.email, u.status]), [['pedro.ramos@auditeste.com.br', 'ativo']]);
   assert.deepEqual(n0.garantirAdmin(), { email: 'pedro.ramos@auditeste.com.br', usuario: 'pedro.ramos' }, 'sem ADMIN_EMAIL, fica quem já estava');
 
+  // AudiHoras que não entrega as horas do próprio gestor: a carteira abre do mesmo jeito, só com os liderados.
+  let foco = 0;
+  const ahManco = servidor(3994, async (req, res) => {
+    const servico = req.url.slice(1), b = await corpoJson(req), r = mock.responder(servico, b);
+    if (servico === 'SetLiderado') foco = b.idLiderado;
+    res.end(JSON.stringify(servico === 'PesquisaApontamentos' && !foco ? { ...r, rc: false, detalhe: 'sem apontamentos' } : r));
+  });
+  const semGestor = await AH.dados(await AH.conectar('http://127.0.0.1:3994/', 'gestor', 'demo'), 2026, 9);
+  ahManco.close();
+  assert.ok(semGestor.equipe.length === 11 && semGestor.equipe.every(c => c.id > 0) && semGestor.lancamentos.every(l => l.c > 0), 'sem as horas do gestor, segue a equipe');
+
   await localNoAr;
   await ponta(`http://127.0.0.1:${PORTA_LOCAL}`, id => fs.readFileSync(path.join(dir, 'cofre', id)));
   console.log('ok: servidor local');
@@ -235,6 +324,6 @@ async function ponta(base, docCru) {
   console.log('ok: ACCOUNT passou em todas as checagens');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => {
   srv.kill();
-  for (const s of [ahFalso, redisFalso, vercel]) s.close();
+  for (const s of [ahFalso, redisFalso, vercel, smtpFalso]) s.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });

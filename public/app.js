@@ -22,33 +22,37 @@ const ICONES = {
   bloqueio: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
   chave: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
   disco: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  ponto: '<rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4M12 12.5v3l2 1.2"/>',
+  envios: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/>',
 };
-const CURTO = { visao: 'Início', projetos: 'Contas', equipe: 'Equipes', fechamento: 'Fechamento', relatorios: 'Relatórios', validacao: 'Validação', cofre: 'Cofre', usuarios: 'Usuários', auditoria: 'Auditoria', financeiro: 'Financeiro' };
+const CURTO = { visao: 'Início', projetos: 'Contas', equipe: 'Equipes', ponto: 'Ponto', fechamento: 'Fechamento', relatorios: 'Relatórios', validacao: 'Validação', cofre: 'Cofre', usuarios: 'Usuários', auditoria: 'Auditoria', envios: 'E-mails', financeiro: 'Financeiro' };
 const PAGINAS = {
-  visao: ['Visão Geral', visao], projetos: ['Contas e projetos', projetos], equipe: ['Gestão de Equipes', equipe],
+  visao: ['Visão Geral', visao], projetos: ['Contas e projetos', projetos], equipe: ['Gestão de Equipes', equipe], ponto: ['Ponto e apontamentos', ponto],
   fechamento: ['Fechamento Mensal', fechamento], relatorios: ['Relatórios', relatorios],
   validacao: ['Validação de Ausências', validacao], cofre: ['Cofre de Documentos', cofre],
-  usuarios: ['Usuários', usuarios], auditoria: ['Auditoria', auditoria], financeiro: ['Financeiro', financeiro],
+  usuarios: ['Usuários', usuarios], auditoria: ['Auditoria', auditoria], envios: ['E-mails das validações', envios], financeiro: ['Financeiro', financeiro],
 };
 const MENUS = {
-  gerente: ['visao', 'projetos', 'equipe', 'fechamento', 'relatorios'],
-  rh: ['validacao', 'cofre'], admin: ['usuarios', 'auditoria'], financeiro: ['financeiro'],
+  gerente: ['visao', 'projetos', 'equipe', 'ponto', 'fechamento', 'relatorios'],
+  rh: ['validacao', 'cofre'], admin: ['usuarios', 'auditoria', 'envios'], financeiro: ['financeiro'],
 };
 MENUS.total = [...MENUS.gerente, ...MENUS.rh, ...MENUS.admin, ...MENUS.financeiro];
 const tem = perfil => R.tem(EU, perfil);
+// O gerente com a permissão do cofre ganha a aba dele (só os documentos da própria equipe).
+const menuDe = () => (EU.perfil === 'gerente' && EU.cofre ? [...MENUS.gerente, 'cofre'] : MENUS[EU.perfil]);
 // Página em tela (a do endereço, se o perfil tiver) e os dados de que ela precisa.
 function paginaAtual() {
-  const menu = MENUS[EU.perfil], [pag, arg] = location.hash.slice(1).split('/').map(x => { try { return decodeURIComponent(x); } catch { return x; } });
+  const menu = menuDe(), [pag, arg] = location.hash.slice(1).split('/').map(x => { try { return decodeURIComponent(x); } catch { return x; } });
   return [menu.includes(pag) ? pag : menu.find(dadosDa) || menu[0], arg]; // sem página no endereço: a primeira que tem dados
 }
 const areaDe = pag => ['gerente', 'rh', 'admin', 'financeiro'].find(k => MENUS[k].includes(pag));
-const dadosDa = pag => ({ gerente: D, rh: RHD, admin: ADM, financeiro: true })[areaDe(pag)];
+const dadosDa = pag => (pag === 'cofre' && !tem('rh') ? D : ({ gerente: D, rh: RHD, admin: ADM, financeiro: true })[areaDe(pag)]);
 const ICONE_SIT = { futuro: '◷', conflito: '⚠', refletida: '✓', sem_apontamento: '⚠' };
 
 let EU = null, LIMITE_DOC = 8e6; // a Vercel aceita menos (o servidor diz quanto)
-let D = null, RHD = null, ADM = null, AUD = null, SEM_HORAS = '';
+let D = null, RHD = null, ADM = null, AUD = null, CFG = null, SEM_HORAS = '';
 let comp = { ano: HOJE.getFullYear(), mes: HOJE.getMonth() + 1 };
-const F = { prjStatus: '', prjArq: false, eqProj: '', hColab: '', hTipo: '', hStatus: 'ativos', hDe: '', hAte: '', relTipo: 'consolidado', rhStatus: 'abertas', rhTipo: '', fecProj: 0, conta: '' };
+const F = { prjStatus: '', prjArq: false, eqProj: '', hColab: '', hTipo: '', hStatus: 'ativos', hDe: '', hAte: '', relTipo: 'consolidado', rhStatus: 'abertas', rhTipo: '', fecProj: 0, conta: '', historico: false, eqVisao: 'projeto', pontoColab: null, pontoDia: 0, pontoProj: '' };
 const ABERTOS = new Set();
 const ABERTAS = new Set(); // linhas de tabela abertas (Equipes, Fechamento), para continuarem abertas depois de uma ação
 function abrirLinha(b) {
@@ -56,7 +60,7 @@ function abrirLinha(b) {
   extra.hidden = !abrir;
   b.setAttribute('aria-expanded', abrir);
   ABERTAS[abrir ? 'add' : 'delete'](b.dataset.chave);
-  if (abrir) carregarFotos();
+  if (abrir) { carregarFotos(); preencherApontamentos(); }
 }
 
 // ---------- utilidades ----------
@@ -77,13 +81,13 @@ const FOTOS = new Map(); // id -> endereço da imagem, ou null enquanto busca / 
 let filaFotos = Promise.resolve();
 function foto(id, nome) {
   const url = FOTOS.get(id);
-  return `<i class="foto c${id % 5}${url ? ' com-foto' : ''}" data-foto="${id}" title="${esc(nome)}"${url ? ` style="background-image:url(${url})"` : ''}>${esc(iniciais(nome))}</i>`;
+  return `<i class="foto c${Math.abs(id) % 5}${url ? ' com-foto' : ''}" data-foto="${id}" title="${esc(nome)}"${url ? ` style="background-image:url(${url})"` : ''}>${esc(iniciais(nome))}</i>`;
 }
 function carregarFotos() {
   if (!EU || !tem('gerente') || !D) return;
   for (const el of document.querySelectorAll('#conteudo [data-foto]')) {
     const id = Number(el.dataset.foto);
-    if (FOTOS.has(id)) continue;
+    if (FOTOS.has(id) || id < 0) continue; // o gestor não está na lista de liderados, fica com as iniciais
     FOTOS.set(id, null);
     filaFotos = filaFotos.then(async () => {
       try {
@@ -240,6 +244,7 @@ const esqueleto = () => `<div class="esq" style="height:150px;border-radius:22px
 async function carregar(atualizar) {
   const c = $('#conteudo');
   const tinha = dadosDa(paginaAtual()[0]);
+  APONT.clear();
   if (!tinha) c.innerHTML = esqueleto(); else c.classList.add('carregando');
   try {
     await Promise.all([
@@ -247,7 +252,7 @@ async function carregar(atualizar) {
       tem('gerente') && api(`/api/dados?ano=${comp.ano}&mes=${comp.mes}${atualizar ? '&atualizar=1' : ''}`)
         .then(x => { if (x.semHoras) SEM_HORAS = x.semHoras; else [D, SEM_HORAS] = [x, '']; }),
       tem('rh') && api('/api/rh').then(x => { RHD = x; }),
-      tem('admin') && Promise.all([api('/api/usuarios'), api('/api/auditoria')]).then(x => { [ADM, AUD] = x; }),
+      tem('admin') && Promise.all([api('/api/usuarios'), api('/api/auditoria'), api('/api/config')]).then(x => { [ADM, AUD, CFG] = x; }),
     ]);
     c.classList.remove('carregando');
     render();
@@ -265,25 +270,28 @@ async function carregar(atualizar) {
 async function recarregar() {
   if (D) D = await api(`/api/dados?ano=${comp.ano}&mes=${comp.mes}`);
   if (tem('rh')) RHD = await api('/api/rh');
-  if (tem('admin')) [ADM, AUD] = await Promise.all([api('/api/usuarios'), api('/api/auditoria')]);
+  if (tem('admin')) [ADM, AUD, CFG] = await Promise.all([api('/api/usuarios'), api('/api/auditoria'), api('/api/config')]);
   render(false);
 }
 function trocarMes(v) {
   const [a, m] = v.split('-').map(Number);
   comp = { ano: a, mes: m };
+  F.pontoDia = 0;
+  F.pontoProj = '';
   carregar();
 }
 
 function render(animar = true) {
   if (!EU) return;
-  const menu = MENUS[EU.perfil], [atual, arg] = paginaAtual();
+  const menu = menuDe(), [atual, arg] = paginaAtual();
   const abas = menu.map(k => `<a href="#${k}" class="${k === atual ? 'ativo' : ''}" title="${PAGINAS[k][0]}" ${k === atual ? 'aria-current="page"' : ''}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONES[k]}</svg><span>${CURTO[k]}</span></a>`).join('');
   $('#menu').innerHTML = abas;
-  $('#menu').classList.toggle('muitas', menu.length > 6);
+  $('#menu').classList.toggle('muitas', menu.length > 7);
   $('#menu-movel').innerHTML = abas;
   $('#titulo-movel').textContent = PAGINAS[atual][0];
   contexto();
   document.title = `${PAGINAS[atual][0]} · ACCOUNT`;
+  if (D) $('#pessoas').innerHTML = D.equipe.map(x => `<option value="${esc(x.nome)}">`).join(''); // busca de pessoa pelo nome
   const c = $('#conteudo');
   c.classList.remove('animar');
   c.innerHTML = dadosDa(atual) ? PAGINAS[atual][1](arg)
@@ -297,6 +305,7 @@ function render(animar = true) {
     contarNumeros(c);
   }
   carregarFotos();
+  preencherApontamentos();
 }
 window.addEventListener('hashchange', () => {
   if (!EU) return;
@@ -475,12 +484,23 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') menuPerfil(f
 const proj = id => D.projetos.find(p => p.id === id);
 const natureza = id => proj(id)?.natureza;
 const fichaDe = pid => D.fichas[pid] || { status: 'ativo' };
-// Carteira em ordem de trabalho: horas no mês e, no empate, nos 6 meses.
-const meus = (comArquivados = false) => {
+// Projetos internos "Gestão de contas - Cliente": não são projeto para fechar; mostram quem cuida de cada conta.
+const ehGC = p => /^gest[aã]o de contas\s*-/i.test(p.nome);
+// Carteira em ordem de trabalho: horas no mês e, no empate, nos 6 meses. Os projetos criados no ACCOUNT (sem horas
+// no AudiHoras) entram só onde se organiza a carteira; fechamento e relatórios seguem com o que tem horas.
+const meus = (comArquivados = false, comManuais = false) => {
   const mes = agrupar(doMes(), 'p'), tudo = agrupar(D.lancamentos, 'p'), h = (m, p) => m.get(p.id) || 0;
-  return D.projetos.filter(p => R.ehProjeto(p) && (comArquivados || fichaDe(p.id).status !== 'arquivado'))
+  return D.projetos.filter(p => R.ehProjeto(p) && !ehGC(p) && (comManuais || !p.manual) && (comArquivados || fichaDe(p.id).status !== 'arquivado'))
     .sort((a, b) => h(mes, b) - h(mes, a) || h(tudo, b) - h(tudo, a));
 };
+// Da competência em tela: o que teve hora no mês e o que foi criado no ACCOUNT e segue em andamento. O resto
+// (projeto encerrado, mês sem apontamento) é histórico: continua guardado e aparece só quando pedem.
+function noMes(lista) {
+  const ids = new Set(doMes().map(l => l.p));
+  return lista.filter(p => ids.has(p.id) || (p.manual && ['ativo', 'aguardando'].includes(fichaDe(p.id).status)));
+}
+const todosProjetos = () => [...meus(true, true), ...D.projetos.filter(ehGC)];
+const tipoProjeto = p => (p.manual ? 'Criado no ACCOUNT' : ehGC(p) ? 'Gestão de contas' : ({ 1: 'Projeto de cliente', 2: 'Projeto interno', 3: 'Benefício' })[p.natureza] || '·');
 // Conta (cliente) de cada projeto, sem ninguém digitar: vale o cliente da ficha; senão as contas do gerente no
 // AudiHoras (projetos "Gestão de contas - Cliente"); senão o começo do nome ("D4Sign PC1657-05 2026..." é da D4Sign).
 const INTERNO = 'Auditeste (interno)';
@@ -511,6 +531,13 @@ function minhasContas(lista) {
   for (const c of Object.values(D.fichasContas || {})) if (c.manual && !m.has(c.nome)) m.set(c.nome, []);
   return m;
 }
+// Contas na tela: entram também as que só têm gestão de contas (o gerente cuida do cliente mesmo sem equipe lá).
+function contasDaTela(lista, soDoMes) {
+  const m = minhasContas(lista), gc = D.projetos.filter(ehGC);
+  for (const p of soDoMes ? noMes(gc) : gc) if (!m.has(contaDe(p))) m.set(contaDe(p), []);
+  return m;
+}
+const gcDaConta = conta => D.projetos.filter(p => ehGC(p) && contaDe(p) === conta);
 const opcoesPorConta = (lista, sel, rotulo = p => p.nome) => [...porConta(lista)].map(([c, ps]) =>
   `<optgroup label="${esc(c)}">${ps.map(p => `<option value="${p.id}" ${String(p.id) === String(sel) ? 'selected' : ''}>${esc(rotulo(p))}</option>`).join('')}</optgroup>`).join('');
 // Relação dos recursos de um grupo de projetos: quem apontou neles nos 6 meses, com horas no mês e no período.
@@ -523,13 +550,27 @@ function recursos(projs) {
       ultimo: dele.reduce((u, l) => { const iso = R.iso(l.a, l.m, l.d); return iso > u ? iso : u; }, '') };
   });
 }
+// Uma linha por pessoa e projeto: quem atua em dois projetos aparece nos dois, com as horas de cada um.
+// Entra quem apontou no projeto nos 6 meses e quem o gerente colocou na equipe à mão.
+function recursosPorProjeto(projs) {
+  const out = [];
+  for (const p of projs) {
+    const doProj = D.lancamentos.filter(l => l.p === p.id), mes = agrupar(doProj.filter(l => l.a === comp.ano && l.m === comp.mes), 'c'), per = agrupar(doProj, 'c');
+    const papel = new Map((fichaDe(p.id).membros || []).map(m => [m.c, m.papel]));
+    for (const c of new Set([...per.keys(), ...papel.keys()])) {
+      out.push({ c, p, papel: papel.get(c) || (ehGC(p) ? 'Gestão de contas' : ''), mes: mes.get(c) || 0, periodo: per.get(c) || 0,
+        ultimo: doProj.reduce((u, l) => { const iso = R.iso(l.a, l.m, l.d); return l.c === c && iso > u ? iso : u; }, '') });
+    }
+  }
+  return out.sort((a, b) => nomeColab(a.c).localeCompare(nomeColab(b.c)) || b.mes - a.mes);
+}
 // Planilha da relação dos recursos (CSV que o Excel abre com acentos e colunas certas).
 function exportarRecursos(conta) {
   const dec = min => (min / 60).toFixed(1).replace('.', ',');
-  const linhas = [['Conta', 'Profissional', 'Projetos', `Horas em ${nomeMes()}`, 'Horas nos últimos 6 meses', 'Último apontamento']];
-  for (const [c, ps] of minhasContas(meus(true))) {
+  const linhas = [['Conta', 'Profissional', 'Projeto', 'Papel', `Horas em ${nomeMes()}`, 'Horas nos últimos 6 meses', 'Último apontamento']];
+  for (const [c, ps] of contasDaTela(meus(true, true))) {
     if (conta && c !== conta) continue;
-    for (const r of recursos(ps)) linhas.push([c, nomeColab(r.c), r.projetos.join(', '), dec(r.mes), dec(r.periodo), dataBR(r.ultimo)]);
+    for (const r of recursosPorProjeto([...ps, ...gcDaConta(c)])) linhas.push([c, nomeColab(r.c), r.p.nome, r.papel, dec(r.mes), dec(r.periodo), dataBR(r.ultimo)]);
   }
   const csv = '\ufeff' + linhas.map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\r\n');
   const a = document.createElement('a');
@@ -551,9 +592,9 @@ function uteisAteHoje() {
   const [ini, fim] = R.limites(comp.ano, comp.mes);
   return R.diasUteis(ini, fim < HOJE_ISO ? fim : HOJE_ISO, { feriados: D.feriados }).length;
 }
-// Equipe do projeto: quem apontou horas nele nos últimos 6 meses, direto do AudiHoras (ninguém aloca à mão).
+// Equipe do projeto: quem apontou horas nele nos últimos 6 meses (direto do AudiHoras) e quem o gerente colocou.
 function membrosProjeto(pid) {
-  return new Set(D.lancamentos.filter(l => l.p === pid).map(l => l.c));
+  return new Set([...D.lancamentos.filter(l => l.p === pid).map(l => l.c), ...(fichaDe(pid).membros || []).map(m => m.c)]);
 }
 // Profissionais cujas horas no projeto mudaram no AudiHoras depois da aprovação (RF-FEC-006).
 function alterados(pid) {
@@ -594,17 +635,21 @@ function evolucao(alvo) {
 }
 
 // ---------- Visão Geral ----------
+// Na tela principal fica o que tem horas na competência escolhida; o que não tem é histórico, mostrado quando pedem.
 function visao() {
-  const mp = meus(), ids = new Set(mp.map(p => p.id)), noProj = doMes().filter(l => ids.has(l.p));
-  const abertos = mp.filter(p => fechDe(p.id).status !== 'aprovado').length;
-  const ativos = mp.filter(p => noProj.some(l => l.p === p.id)).length;
-  const contas = minhasContas(mp), horasConta = ps => soma(noProj.filter(l => ps.some(p => p.id === l.p)));
+  const todos = meus(false, true), doMesP = noMes(todos), mp = F.historico ? todos : doMesP, fora = todos.length - doMesP.length;
+  const ids = new Set(mp.map(p => p.id)), noProj = doMes().filter(l => ids.has(l.p));
+  const comHoras = mp.filter(p => noProj.some(l => l.p === p.id)); // só estes têm o que fechar
+  const abertos = comHoras.filter(p => fechDe(p.id).status !== 'aprovado').length, ativos = comHoras.length;
+  const contas = contasDaTela(mp, !F.historico), horasConta = ps => soma(noProj.filter(l => ps.some(p => p.id === l.p)));
   const contasAtivas = [...contas.values()].filter(horasConta).length;
-  const alertas = alertasCarteira(mp);
+  const alertas = alertasCarteira(todos);
   // Conferência com o AudiHoras: hora lançada que não casou com projeto nenhum aparece aqui.
   const soltos = (D.semProjeto || []).filter(x => x.a === comp.ano && x.m === comp.mes);
   if (soltos.length) alertas.unshift(`<b>${hh(soma(soltos))}</b> lançadas no AudiHoras em ${nomeMes()} não foram ligadas a nenhum projeto (ex.: “${esc(soltos[0].exemplos[0])}”). Clique em Atualizar; se continuar, o projeto não está mais na lista do AudiHoras.`);
-  const maxH = Math.max(1, ...[...contas.values()].map(horasConta));
+  const maxH = Math.max(1, ...[...contas.values()].map(horasConta)), mesTxt = MESES[comp.mes - 1].toLowerCase();
+  const nota = !fora ? '' : `<p class="nota-historico">${F.historico ? `Mostrando também ${fora} projeto(s) sem horas em ${mesTxt}.` : `${fora} projeto(s) sem horas em ${mesTxt} ficaram fora do painel. O histórico continua guardado.`}
+    <button class="link" onclick="filtro('historico', ${!F.historico})">${F.historico ? 'Ocultar histórico' : 'Ver histórico'}</button></p>`;
   return cab('Painel do gerente', `Olá, ${esc(EU.nome.split(/\s+/)[0])}`,
       `Sua carteira em ${nomeMes()}: ${contasAtivas} conta(s) e ${ativos} projeto(s) com horas, ${abertos} fechamento(s) em aberto.`,
       '<a class="btn" href="#relatorios">↗ Relatório executivo</a>')
@@ -616,13 +661,14 @@ function visao() {
       </div>
       <div class="layout-visao">
         <section>
-          <div class="titulo-bloco"><div><h2>Minhas contas</h2><p class="sub">Toque numa conta para ver a relação dos recursos e os projetos</p></div><a class="link" href="#projetos" onclick="F.conta=''">Ver todas →</a></div>
+          <div class="titulo-bloco"><div><h2>Minhas contas</h2><p class="sub">Com horas em ${mesTxt}. Toque numa conta para ver a gestão, os recursos e os projetos</p></div><a class="link" href="#projetos" onclick="F.conta=''">Ver todas →</a></div>
           <div class="tiles">${[...contas].map(([c, ps]) => tileConta(c, ps, noProj, maxH)).join('') || `<div class="card vazio">${SEM_DADOS}</div>`}</div>
+          ${nota}
           <section class="card" style="margin-top:20px"><div class="card-cab"><div><h2>Evolução mensal de horas</h2><p class="sub">Previstas (dias úteis × 8 h) × realizadas · toda a equipe · últimos 6 meses</p></div>
             ${legenda([['Previstas', 'var(--g-prev)'], ['Realizadas', 'var(--g-real)']])}</div>${evolucao()}</section>
         </section>
         <aside class="lateral-visao">
-          <section class="card"><h2>Fechamentos</h2><p class="sub">${nomeMes()}</p>${rosca(mp)}</section>
+          <section class="card"><h2>Fechamentos</h2><p class="sub">${nomeMes()} · projetos com horas no mês</p>${rosca(comHoras)}</section>
           <section class="card"><h2>Atenção</h2><ul class="lista-alertas">${alertas.map(a => `<li>${a}</li>`).join('') || '<li class="ok">Nenhuma pendência na competência.</li>'}</ul></section>
           <a class="cta" href="#relatorios"><span class="cta-ic"><svg viewBox="0 0 24 24">${ICONES.relatorios}</svg></span>
             <span><b>Relatórios gerenciais</b>Resumo executivo, gráficos e PDF prontos para a reunião.</span><span class="cta-seta">→</span></a>
@@ -637,35 +683,41 @@ function semHorasNoMes(ids) {
 }
 function tileConta(c, ps, noProj, maxH) {
   const ids = ps.map(p => p.id), lp = noProj.filter(l => ids.includes(l.p)), h = soma(lp);
-  const gente = [...agrupar(lp, 'c')].sort((a, b) => b[1] - a[1]).map(([x]) => x);
+  const gcIds = gcDaConta(c).map(p => p.id), lgc = doMes().filter(l => gcIds.includes(l.p)), hgc = soma(lgc); // quem cuida da conta
+  const gente = [...agrupar([...lp, ...lgc], 'c')].sort((a, b) => b[1] - a[1]).map(([x]) => x);
   const recursosConta = new Set(D.lancamentos.filter(l => ids.includes(l.p)).map(l => l.c)).size;
-  const abertos = ps.filter(p => fechDe(p.id).status !== 'aprovado').length;
+  const abertos = ps.filter(p => lp.some(l => l.p === p.id) && fechDe(p.id).status !== 'aprovado').length;
+  const selo = !ps.length ? (gcIds.length ? pill('Gestão de contas', 'prj-ativo') : pill('Sem projeto ainda', 'prj-aguardando'))
+    : abertos ? pill(`${abertos} em aberto`, 'fec-conferencia') : h ? pill('Tudo aprovado', 'fec-aprovado') : pill('Sem horas no mês', 'fec-preparacao');
   return `<a class="tile" href="#projetos" data-conta="${esc(c)}" onclick="F.conta=this.dataset.conta">
-    <div class="tile-topo"><div><b>${esc(c)}</b><small>${ps.length} projeto(s) · ${recursosConta} recurso(s)</small></div>${!ps.length ? pill('Sem projeto ainda', 'prj-aguardando') : abertos ? pill(`${abertos} em aberto`, 'fec-conferencia') : pill('Tudo aprovado', 'fec-aprovado')}</div>
-    <div class="tile-num">${hh(h)}<span>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(ids)}</span></div>
+    <div class="tile-topo"><div><b>${esc(c)}</b><small>${ps.length ? `${ps.length} projeto(s) · ${recursosConta} recurso(s)` : gcIds.length ? `${gente.length} pessoa(s) na gestão` : 'Conta criada no ACCOUNT'}</small></div>${selo}</div>
+    <div class="tile-num">${hh(ps.length ? h : hgc)}<span>${ps.length ? '' : 'de gestão '}em ${MESES[comp.mes - 1].toLowerCase()}${h || ps.every(p => p.manual) ? '' : semHorasNoMes(ids)}</span></div>
     <div class="mini"><div style="width:${h / maxH * 100}%"></div></div>
-    <ul class="tile-projs">${ps.slice(0, 3).map(p => `<li><span>${esc(p.nome)}</span><b>${hh(soma(lp.filter(l => l.p === p.id)))}</b></li>`).join('')}${ps.length > 3 ? `<li class="apagado">e mais ${ps.length - 3} projeto(s)</li>` : ''}</ul>
+    <ul class="tile-projs">${ps.slice(0, 3).map(p => `<li><span>${esc(p.nome)}</span><b>${hh(soma(lp.filter(l => l.p === p.id)))}</b></li>`).join('')}${ps.length > 3 ? `<li class="apagado">e mais ${ps.length - 3} projeto(s)</li>` : ''}${hgc && ps.length ? `<li><span>Gestão da conta</span><b>${hh(hgc)}</b></li>` : ''}</ul>
     <div class="tile-rodape"><div class="rostos">${gente.slice(0, 5).map(x => foto(x, nomeColab(x))).join('')}${gente.length > 5 ? `<i class="foto mais">+${gente.length - 5}</i>` : ''}</div></div>
   </a>`;
 }
 
 // ---------- Projetos ----------
 function projetos() {
-  const lista = meus(true).filter(p => (F.prjArq || fichaDe(p.id).status !== 'arquivado') && (!F.prjStatus || fichaDe(p.id).status === F.prjStatus));
-  const grupos = minhasContas(lista);
+  const filtrados = meus(true, true).filter(p => (F.prjArq || fichaDe(p.id).status !== 'arquivado') && (!F.prjStatus || fichaDe(p.id).status === F.prjStatus));
+  // Sem pedir, só o que é do mês; pedir o histórico, um status ou os arquivados mostra tudo o que casa com o pedido.
+  const pedido = F.historico || F.prjStatus || F.prjArq, doMesP = noMes(filtrados), lista = pedido ? filtrados : doMesP, fora = filtrados.length - doMesP.length;
+  const grupos = contasDaTela(lista, !pedido);
   if (F.conta && !grupos.has(F.conta)) F.conta = '';
   const mostrar = F.conta ? [[F.conta, grupos.get(F.conta)]] : [...grupos];
-  const lm = doMes();
+  const lm = doMes(), mesTxt = MESES[comp.mes - 1].toLowerCase();
   const extras = D.projetos.filter(p => !R.ehProjeto(p)).map(p => {
     const lp = lm.filter(l => l.p === p.id);
     return lp.length ? [esc(p.nome), 'Benefício', new Set(lp.map(l => l.c)).size, hh(soma(lp))] : null;
   }).filter(Boolean);
-  return cab('Carteira', 'Contas e projetos', 'Cada conta com a relação dos recursos e os projetos, direto dos apontamentos do AudiHoras.',
-      '<button class="btn" onclick="editarContaDlg(\'\', true)">+ Nova conta</button><button class="btn-sec" onclick="exportarRecursos(F.conta)">⬇ Exportar recursos (Excel)</button>')
+  return cab('Carteira', 'Contas e projetos', 'Cada conta com a gestão, a relação dos recursos e os projetos. As horas vêm dos apontamentos do AudiHoras.',
+      '<button class="btn" onclick="editarContaDlg(\'\', true)">+ Nova conta</button><button class="btn" onclick="novoProjetoDlg(F.conta)">+ Novo projeto</button><button class="btn-sec" onclick="exportarRecursos(F.conta)">⬇ Exportar recursos (Excel)</button>')
     + `<div class="filtros">
         <label>Conta<select onchange="filtro('conta', this.value)"><option value="">Todas as contas</option>${[...grupos.keys()].map(c => `<option ${c === F.conta ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
         <label>Buscar<input type="search" placeholder="Conta, projeto ou cliente" oninput="buscar(this.value)"></label>
         <label>Status<select onchange="filtro('prjStatus', this.value)"><option value="">Todos</option>${opcoes(R.STATUS_PRJ, F.prjStatus)}</select></label>
+        <label class="chk"><input type="checkbox" ${F.historico ? 'checked' : ''} onchange="filtro('historico', this.checked)"> Mostrar sem horas em ${mesTxt} (${fora})</label>
         <label class="chk"><input type="checkbox" ${F.prjArq ? 'checked' : ''} onchange="filtro('prjArq', this.checked)"> Mostrar arquivados</label>
       </div>`
     + somenteLeitura()
@@ -674,25 +726,31 @@ function projetos() {
       ${tabela(['Lançamento', 'Categoria', { t: 'Profissionais', num: 1 }, { t: 'Horas', num: 1 }], extras, { vazio: 'Nenhuma hora adicional nesta competência.' })}</section>`;
 }
 function secaoConta(c, ps, lm, aberta) {
-  const fc = D.fichasContas?.[c] || {}, rs = recursos(ps), ids = ps.map(p => p.id), h = soma(lm.filter(l => ids.includes(l.p)));
-  const linhas = rs.map(r => [pessoa(r.c), r.projetos.map(esc).join(', '), hh(r.mes), hh(r.periodo), dataBR(r.ultimo)]);
+  const fc = D.fichasContas?.[c] || {}, ids = ps.map(p => p.id), h = soma(lm.filter(l => ids.includes(l.p)));
+  const gc = gcDaConta(c), gestao = recursos(gc), mesTxt = MESES[comp.mes - 1].toLowerCase();
+  const rp = recursosPorProjeto(ps), linhas = rp.map(r => [pessoa(r.c), esc(r.p.nome), esc(r.papel) || '·', hh(r.mes), hh(r.periodo), dataBR(r.ultimo)]);
   const contatos = (fc.contatos || []).map(x => [esc(x.nome) || '·', esc(x.papel) || '·', x.email ? `<a class="link" href="mailto:${esc(x.email)}">${esc(x.email)}</a>` : '·', esc(x.telefone) || '·']);
   return `<details class="conta" data-busca="${esc(`${c} ${(fc.tecnologias || []).join(' ')} ${ps.map(p => p.nome).join(' ')}`.toLowerCase())}" data-chave="ct${esc(c)}" ${aberta ? 'open' : ''}
       ontoggle="ABERTAS[this.open ? 'add' : 'delete'](this.dataset.chave); if (this.open) carregarFotos()">
     <summary class="conta-cab"><div><div class="eyebrow">Conta</div><h2>${esc(c)} <span class="seta" aria-hidden="true">⌄</span></h2>
-      <div class="stats"><span><b>${hh(h)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${h ? '' : semHorasNoMes(ids)}</span><span><b>${ps.length}</b>projeto(s)</span><span><b>${rs.length}</b>recurso(s)</span><span><b>${(fc.contatos || []).length}</b>contato(s)</span></div>
+      <div class="stats"><span><b>${hh(h)}</b>em ${mesTxt}${h || ps.every(p => p.manual) ? '' : semHorasNoMes(ids)}</span><span><b>${ps.length}</b>projeto(s)</span><span><b>${new Set(rp.map(r => r.c)).size}</b>recurso(s)</span><span><b>${(fc.contatos || []).length}</b>contato(s)</span>
+        ${gestao.length ? `<span>Gestão da conta: <b>${gestao.map(r => esc(nomeColab(r.c))).join(', ')}</b></span>` : ''}</div>
       ${(fc.tecnologias || []).length ? `<div class="chips">${fc.tecnologias.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}</div></summary>
     <section class="card ficha-conta"><div class="card-cab"><div><h3>Sobre a conta</h3>
         <p class="sobre">${esc(fc.descricao) || '<i class="apagado">Ainda sem descrição. Use "Editar conta" para contar sobre o que é, as tecnologias usadas e os contatos.</i>'}</p></div>
       <div class="acoes"><button class="btn-sec" data-conta="${esc(c)}" onclick="editarContaDlg(this.dataset.conta)">Editar conta</button>
+        <button class="btn-sec no-print" data-conta="${esc(c)}" onclick="novoProjetoDlg(this.dataset.conta)">+ Projeto nesta conta</button>
         <button class="btn-sec no-print" data-conta="${esc(c)}" onclick="exportarRecursos(this.dataset.conta)">⬇ Exportar relação (Excel)</button>
         ${fc.manual && !ps.length ? `<button class="link perigo" data-conta="${esc(c)}" onclick="excluirConta(this.dataset.conta)">Excluir conta</button>` : ''}</div></div>
       <h3>Contatos</h3>${tabela(['Nome', 'Papel', 'E-mail', 'Telefone'], contatos, { vazio: 'Nenhum contato cadastrado.' })}
       ${fc.atualizadoEm ? `<p class="dica" style="margin-top:8px">Atualizado por ${esc(fc.atualizadoPor)} em ${dataHora(fc.atualizadoEm)}</p>` : ''}</section>
-    <section class="card"><h3>Relação dos recursos</h3><p class="sub">Quem apontou horas nos projetos da conta nos últimos 6 meses</p><br>
-      ${tabela(['Profissional', 'Projetos', { t: `Horas em ${MESES[comp.mes - 1].toLowerCase()}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento'], linhas,
-        { vazio: 'Ninguém da sua equipe apontou horas nesta conta nos últimos 6 meses.' })}</section>
-    ${ps.map(p => cardProjeto(p, lm)).join('') || '<div class="card vazio">Nenhum projeto com horas no AudiHoras ainda. Quando a equipe apontar num projeto desta conta, ele entra aqui sozinho.</div>'}
+    ${gestao.length ? `<section class="card gestao-conta"><h3>Gestão da conta</h3><p class="sub">Quem cuida deste cliente, pelas horas em ${gc.map(p => `“${esc(p.nome)}”`).join(', ')}: aparece aqui mesmo sem estar na equipe de um projeto</p><br>
+      ${tabela(['Profissional', 'Atuação', { t: `Horas em ${mesTxt}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento', ''],
+        gestao.map(r => [pessoa(r.c), 'Gestão de contas', hh(r.mes), hh(r.periodo), dataBR(r.ultimo), `<a class="link" href="#ponto/${r.c}">Ver apontamentos</a>`]))}</section>` : ''}
+    <section class="card"><h3>Relação dos recursos</h3><p class="sub">Uma linha por pessoa e projeto: quem atua em mais de um projeto aparece em cada um, com as horas separadas</p><br>
+      ${tabela(['Profissional', 'Projeto', 'Papel', { t: `Horas em ${mesTxt}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento'], linhas,
+        { vazio: 'Ninguém da sua equipe nos projetos desta conta nos últimos 6 meses.' })}</section>
+    ${ps.map(p => cardProjeto(p, lm)).join('') || `<div class="card vazio">Nenhum projeto com horas da sua equipe nesta conta em ${mesTxt}. Quando alguém apontar num projeto dela, ele entra aqui sozinho. Para organizar um trabalho que ainda não está no AudiHoras, use "+ Projeto nesta conta".</div>`}
   </details>`;
 }
 const linhaContato = (x = {}) => `<div class="linha-contato"><input name="c_nome" placeholder="Nome" maxlength="100" value="${esc(x.nome)}"><input name="c_papel" placeholder="Papel (ex.: PO, gerente)" maxlength="80" value="${esc(x.papel)}"><input name="c_email" type="email" placeholder="E-mail" maxlength="120" value="${esc(x.email)}"><input name="c_telefone" placeholder="Telefone" maxlength="40" value="${esc(x.telefone)}"></div>`;
@@ -731,17 +789,21 @@ function excluirConta(nome) {
     },
   });
 }
+// Cada projeto abre com as próprias seções: ficha, equipe e recursos (com o papel de cada pessoa ali) e checklist.
 function cardProjeto(p, lm) {
   const fi = fichaDe(p.id), lp = lm.filter(l => l.p === p.id), porC = agrupar(lp, 'c'), total = soma(lp);
   const doProj = D.lancamentos.filter(l => l.p === p.id), noPeriodo = agrupar(doProj, 'c'), ultimo = new Map();
   for (const l of doProj) { const iso = R.iso(l.a, l.m, l.d); if (iso > (ultimo.get(l.c) || '')) ultimo.set(l.c, iso); }
-  const equipeP = [...noPeriodo].sort((a, b) => b[1] - a[1]).map(([c, min]) => [pessoa(c), hh(porC.get(c) || 0), hh(min), dataBR(ultimo.get(c))]);
+  const papel = new Map((fi.membros || []).map(m => [m.c, m.papel])), itens = fi.checklist || [], feitos = itens.filter(i => i.feito).length;
+  const gente = [...new Set([...[...noPeriodo].sort((a, b) => b[1] - a[1]).map(([c]) => c), ...papel.keys()])];
+  const equipeP = gente.map(c => [pessoa(c), `${esc(papel.get(c)) || '·'}${noPeriodo.has(c) ? '' : ' <span class="tag t-outro">sem horas ainda</span>'}`, hh(porC.get(c) || 0), hh(noPeriodo.get(c) || 0), dataBR(ultimo.get(c)),
+    papel.has(c) ? `<button class="link perigo" onclick="membroProjeto(${p.id}, ${c}, '', true)">${noPeriodo.has(c) ? 'Tirar papel' : 'Tirar'}</button>` : '']);
   return `<details class="card projeto" data-busca="${esc(`${p.nome} ${contaDe(p)}`.toLowerCase())}" ${ABERTOS.has(p.id) ? 'open' : ''} ontoggle="ABERTOS[this.open ? 'add' : 'delete'](${p.id})">
     <summary>
-      <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(clienteDe(p))} · ID AudiHoras ${p.id}</p></div>
-        <div class="acoes">${pillPrj(fi.status)} ${pillFec(fechDe(p.id).status)}<span class="seta" aria-hidden="true">⌄</span></div></div>
-      <div class="stats"><span><b>${hh(total)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${total ? '' : semHorasNoMes(p.id)}</span><span><b>${porC.size}</b>com horas</span>
-        <span><b>${noPeriodo.size}</b>na equipe</span><span>${fi.inicio || fi.fim ? `Vigência <b>${dataBR(fi.inicio)}</b> a <b>${dataBR(fi.fim)}</b>` : 'Vigência não informada'}</span></div>
+      <div class="resumo-prj"><div><h2>${esc(p.nome)}</h2><p class="sub">${esc(clienteDe(p))} · ${p.manual ? 'criado no ACCOUNT, sem horas no AudiHoras' : `ID AudiHoras ${p.id}`}</p></div>
+        <div class="acoes">${pillPrj(fi.status)} ${p.manual ? '' : pillFec(fechDe(p.id).status)}<span class="seta" aria-hidden="true">⌄</span></div></div>
+      <div class="stats"><span><b>${hh(total)}</b>em ${MESES[comp.mes - 1].toLowerCase()}${total || p.manual ? '' : semHorasNoMes(p.id)}</span><span><b>${porC.size}</b>com horas</span>
+        <span><b>${gente.length}</b>na equipe</span>${itens.length ? `<span>Checklist <b>${feitos}/${itens.length}</b></span>` : ''}<span>${fi.inicio || fi.fim ? `Vigência <b>${dataBR(fi.inicio)}</b> a <b>${dataBR(fi.fim)}</b>` : 'Vigência não informada'}</span></div>
     </summary>
     <div class="corpo-prj">
       <div class="ficha">
@@ -752,20 +814,125 @@ function cardProjeto(p, lm) {
       </div>
       <div class="acoes" style="margin-bottom:16px">
         <button class="btn-sec" onclick="editarFicha(${p.id})">Editar ficha</button>
-        <a class="btn-sec" href="#fechamento/${p.id}">Fechamento →</a>
-        <a class="btn-sec" href="#relatorios/${p.id}">Relatório →</a>
+        ${p.manual ? `<button class="btn-sec" onclick="ligarProjetoDlg(${p.id})">Ligar ao AudiHoras</button><button class="link perigo" onclick="excluirProjeto(${p.id})">Excluir projeto</button>`
+          : `<a class="btn-sec" href="#fechamento/${p.id}">Fechamento →</a><a class="btn-sec" href="#relatorios/${p.id}">Relatório →</a>`}
       </div>
-      <h3>Equipe do projeto (pelos apontamentos no AudiHoras)</h3>
-      ${tabela(['Profissional', { t: `Horas em ${MESES[comp.mes - 1].toLowerCase()}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento'], equipeP,
-        { vazio: 'Ninguém da sua equipe apontou horas neste projeto nos últimos 6 meses.' })}
+      <h3>Equipe e recursos do projeto</h3>
+      <p class="sub" style="margin-bottom:8px">Quem aponta horas aqui entra sozinho, pelo AudiHoras. Adicione quem ainda vai começar e diga o papel de cada pessoa neste projeto.</p>
+      ${tabela(['Profissional', 'Papel no projeto', { t: `Horas em ${MESES[comp.mes - 1].toLowerCase()}`, num: 1 }, { t: 'Últimos 6 meses', num: 1 }, 'Último apontamento', ''], equipeP,
+        { vazio: 'Ninguém na equipe deste projeto ainda. Busque a pessoa pelo nome logo abaixo.' })}
+      <form class="add-pessoa" onsubmit="adicionarMembro(event, this, ${p.id})">
+        <input name="nome" list="pessoas" autocomplete="off" required aria-label="Nome da pessoa" placeholder="Digite o nome para buscar na equipe">
+        <input name="papel" maxlength="60" aria-label="Papel no projeto" placeholder="Papel no projeto (ex.: QA, líder técnico)">
+        <button class="btn-sec">+ Adicionar ao projeto</button>
+      </form>
+      <h3 style="margin-top:18px">Checklist${itens.length ? ` <span class="apagado">· ${feitos} de ${itens.length} concluído(s)</span>` : ''}</h3>
+      ${itens.length ? `<div class="mini" style="width:100%"><div style="width:${feitos / itens.length * 100}%"></div></div>` : ''}
+      <ul class="checklist">${itens.map(i => `<li class="${i.feito ? 'feito' : ''}"><label><input type="checkbox" ${i.feito ? 'checked' : ''} onchange="itemChecklist(${p.id}, { acao: 'marcar', id: '${i.id}', feito: this.checked })"> <span>${esc(i.texto)}</span></label>
+        <small>${i.feito ? `concluído por ${esc(i.feitoPor)} em ${dataHora(i.feitoEm)}` : `criado por ${esc(i.por)} em ${dataHora(i.em)}`}</small>
+        <button class="link perigo" onclick="itemChecklist(${p.id}, { acao: 'apagar', id: '${i.id}' })">Excluir</button></li>`).join('')
+        || '<li class="apagado">Nenhum item ainda. Crie as atividades, verificações e pendências do projeto no campo abaixo.</li>'}</ul>
+      <form class="add-pessoa" onsubmit="event.preventDefault(); itemChecklist(${p.id}, { acao: 'criar', texto: this.texto.value })">
+        <input name="texto" maxlength="200" required aria-label="Novo item do checklist" placeholder="Novo item (ex.: validar o ambiente de homologação)">
+        <button class="btn-sec">+ Adicionar item</button>
+      </form>
     </div>
   </details>`;
 }
+// Busca de pessoa pelo nome: vale o nome inteiro (a lista do campo sugere) ou um pedaço que só sirva para uma pessoa.
+const semAcento = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+function pessoaPorNome(txt) {
+  const q = semAcento(txt), exata = D.equipe.find(c => semAcento(c.nome) === q);
+  if (exata) return exata;
+  const parecidas = q ? D.equipe.filter(c => semAcento(c.nome).includes(q)) : [];
+  if (parecidas.length === 1) return parecidas[0];
+  throw new Error(parecidas.length ? `"${txt}" serve para ${parecidas.length} pessoas. Escolha uma da lista.` : `Não achei "${txt}" na sua equipe.`);
+}
+async function membroProjeto(pid, colabId, papel, remover = false) {
+  try {
+    D.fichas[pid] = await api(`/api/projetos/${pid}/membros`, { method: 'POST', body: { colabId, papel, remover } });
+    render(false);
+    aviso(remover ? `${nomeColab(colabId)} saiu da equipe escolhida à mão.` : `${nomeColab(colabId)} está na equipe do projeto.`);
+  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
+}
+function adicionarMembro(ev, f, pid) {
+  ev.preventDefault();
+  try { membroProjeto(pid, pessoaPorNome(f.nome.value).id, f.papel.value); } catch (e) { aviso(e.message, true); }
+}
+async function itemChecklist(pid, corpo) {
+  try {
+    D.fichas[pid] = await api(`/api/projetos/${pid}/checklist`, { method: 'POST', body: corpo });
+  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
+  render(false);
+}
+function novoProjetoDlg(conta = '') {
+  dialogo('Novo projeto', `
+    <label class="inteiro">Nome do projeto<input name="nome" required maxlength="120" placeholder="Ex.: Ailos, regressão do aplicativo"></label>
+    <label class="inteiro">Conta (cliente)<input name="cliente" maxlength="120" list="contas-lista" autocomplete="off" value="${esc(conta)}" placeholder="Escolha uma conta ou digite uma nova"></label>
+    <datalist id="contas-lista">${[...contasDaTela(meus(true, true)).keys()].map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+    <label class="inteiro">Sobre o projeto<textarea name="descricao" maxlength="2000" placeholder="O que é o projeto, o que a equipe faz, escopo"></textarea></label>
+    <div class="inteiro"><b style="font-size:12.5px">Equipe do projeto</b>
+      <div class="add-pessoa">
+        <input id="np-nome" list="pessoas" autocomplete="off" aria-label="Nome da pessoa" placeholder="Digite o nome para buscar na equipe" onkeydown="if (event.key === 'Enter') { event.preventDefault(); pessoaNoDlg(); }">
+        <input id="np-papel" maxlength="60" aria-label="Papel no projeto" placeholder="Papel (opcional)" onkeydown="if (event.key === 'Enter') { event.preventDefault(); pessoaNoDlg(); }">
+        <button type="button" class="btn-sec" onclick="pessoaNoDlg()">+ Adicionar</button>
+      </div>
+      <ul class="checklist" id="np-lista"></ul></div>
+    <p class="dica inteiro">Serve para organizar equipe, papéis e checklist de um trabalho que ainda não está no AudiHoras. As horas continuam vindo de lá: quando o projeto existir no AudiHoras, use "Ligar ao AudiHoras" para juntar os dois.</p>`, {
+    ok: 'Criar projeto',
+    enviar: async fd => {
+      const papeis = fd.getAll('m_papel'), membros = fd.getAll('m_id').map((id, i) => ({ colabId: Number(id), papel: papeis[i] }));
+      const r = await api('/api/projetos', { method: 'POST', body: { nome: fd.get('nome'), cliente: fd.get('cliente'), descricao: fd.get('descricao'), membros } });
+      D = await api(`/api/dados?ano=${comp.ano}&mes=${comp.mes}`);
+      ABERTOS.add(r.id);
+      F.conta = contaDe(proj(r.id));
+      if (location.hash !== '#projetos') location.hash = '#projetos'; else render(false);
+      aviso('Projeto criado.');
+    },
+  });
+}
+function pessoaNoDlg() {
+  const nome = $('#np-nome'), papel = $('#np-papel'), erro = $('#dialogo .dlg-erro');
+  erro.textContent = '';
+  let c;
+  try { c = pessoaPorNome(nome.value); } catch (e) { erro.textContent = e.message; return; }
+  if ($(`#np-lista input[name="m_id"][value="${c.id}"]`)) { erro.textContent = `${c.nome} já está na lista.`; return; }
+  $('#np-lista').insertAdjacentHTML('beforeend', `<li><span style="flex:1">${esc(c.nome)}${papel.value ? ` · ${esc(papel.value)}` : ''}</span><input type="hidden" name="m_id" value="${c.id}"><input type="hidden" name="m_papel" value="${esc(papel.value)}"><button type="button" class="link perigo" onclick="this.parentNode.remove()">Tirar</button></li>`);
+  nome.value = papel.value = '';
+  nome.focus();
+}
+function ligarProjetoDlg(pid) {
+  dialogo('Ligar ao AudiHoras', `<p>Quando o projeto passa a existir no AudiHoras, a equipe, os papéis, o checklist e a ficha de <b>${esc(proj(pid).nome)}</b> vão para o projeto de lá, e este aqui deixa de existir.</p>
+    <label class="inteiro">Projeto do AudiHoras<select name="alvo" required><option value="">Selecione</option>${opcoesPorConta(meus(true), '')}</select></label>`, {
+    ok: 'Ligar',
+    enviar: async fd => {
+      const r = await api(`/api/projetos/${pid}/ligar`, { method: 'POST', body: { alvo: Number(fd.get('alvo')) } });
+      D = await api(`/api/dados?ano=${comp.ano}&mes=${comp.mes}`);
+      ABERTOS.add(r.id);
+      F.conta = contaDe(proj(r.id));
+      F.historico = true; // o projeto de lá pode não ter hora neste mês
+      render(false);
+      aviso('Projeto ligado ao do AudiHoras.');
+    },
+  });
+}
+function excluirProjeto(pid) {
+  dialogo('Excluir projeto', `<p>Excluir ${esc(proj(pid).nome)}, com a equipe escolhida e o checklist? Ele foi criado no ACCOUNT e não tem horas no AudiHoras.</p>`, {
+    ok: 'Excluir', perigo: true,
+    enviar: async () => {
+      await api(`/api/projetos/${pid}`, { method: 'DELETE' });
+      D = await api(`/api/dados?ano=${comp.ano}&mes=${comp.mes}`);
+      render(false);
+      aviso('Projeto excluído.');
+    },
+  });
+}
 function editarFicha(pid) {
-  const fi = fichaDe(pid);
-  dialogo(`Ficha de ${esc(proj(pid).nome)}`, `
-    <p>O identificador oficial (ID ${pid}) e as horas vêm do AudiHoras e não mudam aqui.</p>
-    <label class="inteiro">Cliente (conta)<input name="cliente" maxlength="120" value="${esc(fi.cliente)}" placeholder="${esc(contaDe(proj(pid), false))} (automático pelo AudiHoras)"></label>
+  const fi = fichaDe(pid), p = proj(pid);
+  dialogo(`Ficha de ${esc(p.nome)}`, `
+    ${p.manual ? `<label class="inteiro">Nome do projeto<input name="nome" required maxlength="120" value="${esc(p.nome)}"></label>`
+      : `<p>O identificador oficial (ID ${pid}) e as horas vêm do AudiHoras e não mudam aqui.</p>`}
+    <label class="inteiro">Cliente (conta)<input name="cliente" maxlength="120" value="${esc(fi.cliente)}" placeholder="${esc(contaDe(p, false))} (automático pelo nome)"></label>
     <label>Status<select name="status">${opcoes(R.STATUS_PRJ, fi.status)}</select></label>
     <label>Início da vigência<input type="date" name="inicio" value="${fi.inicio || ''}"></label>
     <label>Fim da vigência<input type="date" name="fim" value="${fi.fim || ''}"></label>
@@ -775,6 +942,7 @@ function editarFicha(pid) {
     <p class="dica">Deixe o cliente vazio para usar a conta automática. Contratos não são anexados. Arquivar preserva fechamentos, vínculos e histórico.</p>`, {
     enviar: async fd => {
       D.fichas[pid] = await api(`/api/projetos/${pid}`, { method: 'POST', body: Object.fromEntries(fd) });
+      if (p.manual) p.nome = D.fichas[pid].nome;
       render(false);
       aviso('Ficha do projeto salva.');
     },
@@ -782,20 +950,25 @@ function editarFicha(pid) {
 }
 
 // ---------- Gestão de Equipes ----------
-// Horas de uma pessoa no mês, projeto a projeto (todos, inclusive internos, benefícios e o que não casou com projeto).
+// Horas de uma pessoa no mês, projeto a projeto (todos, inclusive internos, benefícios e o que não casou com projeto),
+// com o papel dela em cada um. Entram também os projetos em que o gerente a colocou e que ainda não têm hora.
 function horasDaPessoa(c) {
   const lc = doMes().filter(l => l.c === c), solto = soma((D.semProjeto || []).filter(x => x.c === c && x.a === comp.ano && x.m === comp.mes));
-  const tipo = p => ({ 1: 'Cliente', 2: 'Interno', 3: 'Benefício' })[natureza(p)] || '·';
-  const linhas = [...agrupar(lc, 'p')].sort((a, b) => b[1] - a[1]).map(([p, min]) => [esc(proj(p).nome), esc(contaDe(proj(p))), tipo(p), hh(min)]);
-  if (solto) linhas.push(['<i>Sem projeto reconhecido</i>', '·', '·', `<span class="neg">${hh(solto)}</span>`]);
-  return `<h4>Horas registradas em ${nomeMes()}, por projeto</h4>${tabela(['Projeto', 'Conta', 'Tipo', { t: 'Horas', num: 1 }], linhas,
-    { vazio: 'Sem horas no mês.', rodape: ['Total', '', '', hh(soma(lc) + solto)] })}`;
+  const papelEm = p => esc((fichaDe(p.id).membros || []).find(m => m.c === c)?.papel) || '·', comHoras = agrupar(lc, 'p');
+  const linhas = [...comHoras].sort((a, b) => b[1] - a[1]).map(([p, min]) => [esc(proj(p).nome), esc(contaDe(proj(p))), tipoProjeto(proj(p)), papelEm(proj(p)), hh(min)]);
+  for (const p of D.projetos) if (!comHoras.has(p.id) && (fichaDe(p.id).membros || []).some(m => m.c === c)) linhas.push([esc(p.nome), esc(contaDe(p)), tipoProjeto(p), papelEm(p), hh(0)]);
+  if (solto) linhas.push(['<i>Sem projeto reconhecido</i>', '·', '·', '·', `<span class="neg">${hh(solto)}</span>`]);
+  return `<h4>Horas registradas em ${nomeMes()}, por projeto</h4>${tabela(['Projeto', 'Conta', 'Tipo', 'Papel', { t: 'Horas', num: 1 }], linhas,
+    { vazio: 'Sem horas no mês.', rodape: ['Total', '', '', '', hh(soma(lc) + solto)] })}`;
 }
+// Documento de uma ausência, para o gerente: abre se ele tem a permissão do cofre; senão, só sabe que existe.
+const docGerente = r => (r.arquivo ? `<a class="link" href="/api/arquivo/${r.arquivo.id}" target="_blank" rel="noopener">🔒 Abrir</a>`
+  : r.documento ? '🔒 Com o RH' : MEDICO(r.tipo) ? '<span class="neg">Pendente</span>' : '·');
 function detalhePessoa(c) {
   const regs = D.registros.filter(r => r.colabId === c.id).sort((a, b) => b.inicio.localeCompare(a.inicio)).map(r => [tag(r.tipo), periodo(r),
-    R.diasUteis(r.inicio, r.fim, { feriados: D.feriados }).length, pillReg(r.status), r.documento ? '🔒 Com o RH' : MEDICO(r.tipo) ? '<span class="neg">Pendente</span>' : '·', esc(r.obs) || '·']);
+    R.diasUteis(r.inicio, r.fim, { feriados: D.feriados }).length, pillReg(r.status), docGerente(r), esc(r.obs) || '·']);
   return `<div class="detalhe-pessoa">
-    <div>${horasDaPessoa(c.id)}</div>
+    <div>${horasDaPessoa(c.id)}<a class="btn-sec" style="margin-top:10px" href="#ponto/${c.id}">Ver os apontamentos dia a dia →</a></div>
     <div><h4>Ausências e férias</h4>${tabela(['Tipo', 'Período', { t: 'Dias úteis', num: 1 }, 'Situação', 'Documento', 'O que aconteceu'], regs, { vazio: 'Nenhum registro.' })}
       <button class="btn-sec" style="margin-top:10px" data-colab="${c.id}" onclick="registrarPara(this.dataset.colab)">+ Registrar ausência ou férias</button></div>
   </div>`;
@@ -815,9 +988,33 @@ function programacaoFerias(membros) {
   return `<section class="card"><h2>Programação de férias</h2><p class="sub">Férias em andamento e programadas. Registre as próximas no formulário abaixo: elas explicam os dias sem ponto no AudiHoras.</p><br>
     ${tabela(['Profissional', 'Período', { t: 'Dias úteis', num: 1 }, 'Quando', 'Situação'], linhas, { vazio: 'Nenhuma férias programada.' })}</section>`;
 }
-function equipe() {
-  const lm = doMes(), regs = registrosDoMes(), prev = uteisAteHoje() * 480;
-  const membros = F.eqProj ? membrosProjeto(Number(F.eqProj)) : null;
+// Cada projeto com a própria equipe e as horas que cada pessoa apontou nele: quem atua em dois projetos aparece
+// nos dois, com as horas de cada um, e não somadas. O nome abre os apontamentos da pessoa só naquele projeto.
+function equipePorProjeto() {
+  const lm = doMes(), horasP = agrupar(lm, 'p'), totalC = agrupar(lm, 'c'), todos = todosProjetos(), doMesP = noMes(todos), mesTxt = MESES[comp.mes - 1].toLowerCase();
+  const ps = (F.eqProj ? todos.filter(p => p.id === Number(F.eqProj)) : F.historico ? todos : doMesP).slice().sort((a, b) => (horasP.get(b.id) || 0) - (horasP.get(a.id) || 0));
+  const fora = todos.length - doMesP.length;
+  return (ps.map(p => {
+    const lp = lm.filter(l => l.p === p.id), porC = agrupar(lp, 'c'), papel = new Map((fichaDe(p.id).membros || []).map(m => [m.c, m.papel]));
+    const gente = [...new Set([...[...porC].sort((a, b) => b[1] - a[1]).map(([c]) => c), ...papel.keys()])];
+    const linhas = gente.map(c => {
+      const min = porC.get(c) || 0, tot = totalC.get(c) || 0, outros = [...agrupar(lm.filter(l => l.c === c && l.p !== p.id && R.ehProjeto(proj(l.p))), 'p')].sort((a, b) => b[1] - a[1]);
+      return { a: `data-busca="${esc(nomeColab(c).toLowerCase())}"`, chave: `ep${p.id}|${c}`, extra: `<div data-apont="${c}" data-proj="${p.id}"><span class="apagado">Buscando os apontamentos…</span></div>`,
+        c: [pessoa(c, true), esc(papel.get(c)) || (ehGC(p) ? 'Gestão de contas' : '·'), `<b>${hh(min)}</b>`, new Set(lp.filter(l => l.c === c).map(l => l.d)).size, tot ? pct(min / tot) : '·',
+          outros.map(([o, m]) => `${esc(proj(o).nome)} (${hh(m)})`).join(', ') || '<span class="apagado">Só neste</span>'] };
+    });
+    return `<section class="card equipe-projeto"><div class="card-cab"><div><div class="eyebrow">${esc(contaDe(p))}</div><h2>${esc(p.nome)}</h2>
+        <p class="sub">${tipoProjeto(p)} · ${gente.length} pessoa(s) · ${hh(soma(lp))} em ${mesTxt}</p></div>
+        ${p.manual || ehGC(p) ? '' : `<a class="btn-sec mini-btn" href="#fechamento/${p.id}">Fechamento →</a>`}</div>
+      ${tabela(['Profissional', 'Papel no projeto', { t: 'Horas neste projeto', num: 1 }, { t: 'Dias com ponto', num: 1 }, { t: 'Parte do mês da pessoa', num: 1 }, 'Também atua em'], linhas,
+        { vazio: 'Ninguém nesta equipe ainda.', rodape: ['Total', '', hh(soma(lp)), '', '', ''] })}</section>`;
+  }).join('') || `<div class="card vazio">${SEM_DADOS}</div>`)
+    + (F.eqProj || !fora ? '' : `<p class="nota-historico" style="margin:-6px 2px 20px">${F.historico ? `Mostrando também ${fora} projeto(s) sem horas em ${mesTxt}.` : `${fora} projeto(s) sem horas em ${mesTxt} não aparecem.`}
+      <button class="link" onclick="filtro('historico', ${!F.historico})">${F.historico ? 'Ocultar histórico' : 'Ver histórico'}</button></p>`);
+}
+function equipePorPessoa(membros) {
+  const lm = doMes(), regs = registrosDoMes(), prev = uteisAteHoje() * 480, pid = Number(F.eqProj);
+  const ultimoDe = c => D.lancamentos.reduce((u, l) => { const iso = R.iso(l.a, l.m, l.d); return l.c === c && iso > u ? iso : u; }, '');
   const linhas = D.equipe.filter(c => !membros || membros.has(c.id)).map(c => {
     const lc = lm.filter(l => l.c === c.id), solto = soma((D.semProjeto || []).filter(x => x.c === c.id && x.a === comp.ano && x.m === comp.mes));
     const total = soma(lc) + solto; // o mesmo total do AudiHoras, inclusive o que não casou com projeto
@@ -826,18 +1023,24 @@ function equipe() {
       const an = R.analisar(r, lc, natureza, { a: comp.ano, m: comp.mes, ate: HOJE_ISO, feriados: D.feriados });
       return `<div>${tag(r.tipo)} <span class="apagado">${an.dias}d</span><span class="situacao ${an.situacao}">${ICONE_SIT[an.situacao]} ${R.SITUACAO[an.situacao]}</span></div>`;
     }).join('');
-    return { a: `data-busca="${esc(c.nome.toLowerCase())}"`, chave: 'eq' + c.id, extra: detalhePessoa(c), c: [pessoa(c.id, true), projs.map(esc).join(', ') || '·', `${hh(total)}${solto ? `<small class="neg">${hh(solto)} sem projeto</small>` : ''}`, hh(prev),
-      `<span class="${total < prev ? 'neg' : total > prev ? 'pos' : ''}">${sinal(total - prev)}</span>`, aus || '·', esc(c.ultimo) || '·'] };
+    return { a: `data-busca="${esc(c.nome.toLowerCase())}"`, chave: 'eq' + c.id, extra: detalhePessoa(c), c: [`${pessoa(c.id, true)}${c.gestor ? ' <span class="tag t-gestor">Gestor</span>' : ''}`, projs.map(esc).join(', ') || '·',
+      `${hh(total)}${pid ? `<small>${hh(soma(lc.filter(l => l.p === pid)))} neste projeto</small>` : ''}${solto ? `<small class="neg">${hh(solto)} sem projeto</small>` : ''}`, hh(prev),
+      `<span class="${total < prev ? 'neg' : total > prev ? 'pos' : ''}">${sinal(total - prev)}</span>`, aus || '·', esc(c.ultimo) || dataBR(ultimoDe(c.id))] };
   });
-  return cab('Pessoas', 'Gestão de Equipes', 'Clique no nome para ver as horas e as ausências da pessoa. Lance faltas, férias, licenças e atestados.')
+  return `<section class="card"><div class="card-cab"><div><h2>Equipe em ${nomeMes()}</h2>
+      <p class="sub">Apontado no AudiHoras × previsto até hoje (dias úteis × 8 h). Clique no nome para abrir as horas por projeto e as ausências. Ausências não descontam sozinhas: a decisão é no fechamento.</p></div></div>
+      ${tabela(['Profissional', 'Projetos no mês', { t: 'Apontado', num: 1 }, { t: 'Previsto', num: 1 }, { t: 'Diferença', num: 1 }, 'Ausências no mês', 'Último apontamento'], linhas)}
+    </section>`;
+}
+function equipe() {
+  const porProjeto = F.eqVisao === 'projeto', membros = F.eqProj ? membrosProjeto(Number(F.eqProj)) : null;
+  return cab('Pessoas', 'Gestão de Equipes', 'A equipe de cada projeto, com as horas separadas projeto a projeto, ou a visão pessoa por pessoa. Lance faltas, férias, licenças e atestados.')
     + `<div class="filtros">
-        <label>Projeto<select onchange="filtro('eqProj', this.value)"><option value="">Todos os projetos</option>${opcoesPorConta(meus(true), F.eqProj)}</select></label>
+        <div class="segmento" role="group" aria-label="Ver a equipe por"><button aria-pressed="${porProjeto}" onclick="filtro('eqVisao', 'projeto')">Por projeto</button><button aria-pressed="${!porProjeto}" onclick="filtro('eqVisao', 'pessoa')">Por pessoa</button></div>
+        <label>Projeto<select onchange="filtro('eqProj', this.value)"><option value="">Todos os projetos</option>${opcoesPorConta(todosProjetos(), F.eqProj)}</select></label>
         <label>Buscar profissional<input type="search" placeholder="Nome" oninput="buscar(this.value)"></label>
       </div>
-      <section class="card"><div class="card-cab"><div><h2>Equipe em ${nomeMes()}</h2>
-        <p class="sub">Apontado no AudiHoras × previsto até hoje (dias úteis × 8 h). Clique no nome para abrir as horas por projeto e as ausências. Ausências não descontam sozinhas: a decisão é no fechamento.</p></div></div>
-        ${tabela(['Profissional', 'Projetos no mês', { t: 'Apontado', num: 1 }, { t: 'Previsto', num: 1 }, { t: 'Diferença', num: 1 }, 'Ausências no mês', 'Último apontamento'], linhas)}
-      </section>
+      ${porProjeto ? equipePorProjeto() : equipePorPessoa(membros)}
       ${programacaoFerias(membros)}
       <section class="card"><h2>Registrar ausência ou férias</h2><p class="sub">Licença médica, atestado, falta, ausência combinada, férias (inclusive programadas) ou outro motivo. Fica salvo no ACCOUNT e não altera o AudiHoras: serve para explicar os dias sem ponto.</p><br>${formRegistro()}</section>
       ${historico()}`;
@@ -851,7 +1054,7 @@ function formRegistro() {
     <label class="largo">O que aconteceu (obrigatório em "Outro motivo")<input name="obs" maxlength="500" placeholder="Ex.: entrou de licença médica; compensação combinada com o cliente"></label>
     <label>Documento ou print (PDF ou imagem)<input type="file" name="arquivo" accept=".pdf,.png,.jpg,.jpeg,.webp"></label>
     <button class="btn">Registrar</button>
-    <p class="dica inteiro">Não informe diagnóstico nem CID. O documento médico vai direto para o cofre do RH e não fica visível para a gestão.</p>
+    <p class="dica inteiro">Não informe diagnóstico nem CID. O documento vai direto para o cofre: ${EU.cofre ? 'o RH vê todos e você, só os da sua equipe' : 'fica com o RH e não aparece para a gestão'}.</p>
   </form>`;
 }
 async function salvarRegistro(ev, f, confirmar = false) {
@@ -884,7 +1087,7 @@ function historico() {
   if (F.hDe) regs = regs.filter(r => r.fim >= F.hDe);
   if (F.hAte) regs = regs.filter(r => r.inicio <= F.hAte);
   const linhas = regs.map(r => [esc(r.colab), tag(r.tipo), periodo(r), R.diasUteis(r.inicio, r.fim, { feriados: D.feriados }).length, pillReg(r.status),
-    r.documento ? '🔒 Com o RH' : MEDICO(r.tipo) ? '<span class="neg">Pendente</span>' : '·', esc(r.obs) || '·',
+    docGerente(r), esc(r.obs) || '·',
     `${esc(r.por)}<small>${dataHora(r.em)}</small>`, r.status === 'cancelada' ? '' : `<button class="link perigo" onclick="cancelarRegistro('${r.id}')">Cancelar</button>`]);
   return `<section class="card"><h2>Histórico de ausências</h2><p class="sub">Por projeto, profissional, tipo e período, inclusive o que já foi usado em meses fechados</p><br>
     <div class="filtros">
@@ -910,11 +1113,106 @@ function cancelarRegistro(id) {
   });
 }
 
+// ---------- Ponto e apontamentos ----------
+// O que antes pedia abrir o AudiHoras: o mês da pessoa dia a dia e cada apontamento (início, fim, projeto,
+// atividade e observação). Somente leitura; os lançamentos são buscados só quando a tela pede.
+const SEMANA = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+const APONT = new Map(); // "pessoa|ano-mês" -> lançamentos, a promessa enquanto busca, ou { erro }
+function apontamentosDe(c) {
+  const k = `${c}|${comp.ano}-${comp.mes}`, v = APONT.get(k);
+  if (Array.isArray(v) || v instanceof Promise) return Promise.resolve(v);
+  if (v) return Promise.reject(new Error(v.erro));
+  const p = api(`/api/apontamentos?colab=${c}&ano=${comp.ano}&mes=${comp.mes}`)
+    .then(r => { APONT.set(k, r.lancamentos); return r.lancamentos; }, e => { APONT.set(k, { erro: e.message }); throw e; });
+  APONT.set(k, p);
+  return p;
+}
+const chaveProj = x => String(x.p ?? 'x:' + x.projeto); // o que não casou com projeto fica pelo nome que veio
+function tabelaApontamentos(l, comProjeto = true) {
+  const dia = d => `<span>${p2(d)}/${p2(comp.mes)} <span class="apagado">${SEMANA[new Date(comp.ano, comp.mes - 1, d).getDay()]}</span></span>`;
+  const projeto = x => (x.p == null ? `<span class="neg">${esc(x.projeto)}</span><small>fora da lista de projetos</small>` : esc(x.projeto));
+  return tabela(['Dia', 'Início', 'Fim', ...(comProjeto ? ['Projeto'] : []), 'Atividade', 'Observação', { t: 'Horas', num: 1 }],
+    l.map(x => [dia(x.d), esc(x.inicio), esc(x.final), ...(comProjeto ? [projeto(x)] : []), esc(x.atividade) || '·', esc(x.obs) || '·', hh(x.min)]),
+    { vazio: 'Nenhum apontamento.', rodape: ['Total', '', '', ...(comProjeto ? [''] : []), '', '', hh(soma(l))] });
+}
+// Linhas abertas em Equipes: os apontamentos da pessoa naquele projeto chegam depois que a linha abre.
+async function preencherApontamentos() {
+  for (const el of document.querySelectorAll('#conteudo [data-apont]:not([data-pronto])')) {
+    if (el.closest('[hidden]')) continue;
+    el.dataset.pronto = 1;
+    try {
+      const l = await apontamentosDe(Number(el.dataset.apont));
+      el.innerHTML = `<h4>Apontamentos neste projeto em ${nomeMes()}</h4>${tabelaApontamentos(l.filter(x => String(x.p) === el.dataset.proj), false)}`;
+    } catch (e) {
+      if (!e.silencioso) el.innerHTML = `<span class="neg">${esc(e.message)}</span>`;
+    }
+  }
+}
+function irParaPessoa(campo) {
+  try { location.hash = '#ponto/' + pessoaPorNome(campo.value).id; } catch (e) { aviso(e.message, true); }
+}
+function irRegistrar(id) {
+  addEventListener('hashchange', () => registrarPara(id), { once: true }); // depois de a tela de Equipes entrar
+  location.hash = '#equipe';
+}
+function ponto(arg) {
+  const c = D.equipe.find(x => String(x.id) === arg) || D.equipe.find(x => x.id === F.pontoColab) || D.equipe[0];
+  if (F.pontoColab !== c.id) Object.assign(F, { pontoColab: c.id, pontoDia: 0, pontoProj: '' });
+  const topo = cab('AudiHoras no ACCOUNT', 'Ponto e apontamentos', 'O ponto de cada pessoa, dia a dia, sem sair do ACCOUNT. Somente leitura: o lançamento continua sendo feito no AudiHoras.');
+  const escolher = `<label>Profissional<select aria-label="Profissional" onchange="location.hash='#ponto/'+this.value">${D.equipe.map(x => `<option value="${x.id}" ${x.id === c.id ? 'selected' : ''}>${esc(x.nome)}${x.gestor ? ' (gestor)' : ''}</option>`).join('')}</select></label>
+    <label>Buscar pelo nome<input type="search" list="pessoas" autocomplete="off" placeholder="Digite o nome" onchange="irParaPessoa(this)"></label>`;
+  const l = APONT.get(`${c.id}|${comp.ano}-${comp.mes}`);
+  if (!Array.isArray(l)) {
+    if (l?.erro) return topo + `<div class="filtros">${escolher}</div><div class="card vazio">${esc(l.erro)}<br><br><button class="btn" onclick="APONT.clear(); render(false)">Tentar de novo</button></div>`;
+    apontamentosDe(c.id).catch(() => {}).then(() => { if (EU && D && paginaAtual()[0] === 'ponto') render(false); });
+    return topo + `<div class="filtros">${escolher}</div><div class="esq" style="height:96px;margin-bottom:20px"></div><div class="esq" style="height:340px"></div>`;
+  }
+  const [ini, fim] = R.limites(comp.ano, comp.mes), ate = fim < HOJE_ISO ? fim : HOJE_ISO, mesTxt = MESES[comp.mes - 1].toLowerCase();
+  const porDia = agrupar(l, 'd'), total = soma(l), prev = uteisAteHoje() * 480;
+  const aus = D.registros.filter(r => r.colabId === c.id && r.status !== 'cancelada' && r.inicio <= fim && r.fim >= ini);
+  const ausDe = iso => aus.find(r => r.inicio <= iso && r.fim >= iso);
+  const semPonto = R.diasUteis(ini, ate, { feriados: D.feriados }).filter(iso => !porDia.get(Number(iso.slice(8)))), semExplicar = semPonto.filter(iso => !ausDe(iso));
+  const prim = new Date(comp.ano, comp.mes - 1, 1).getDay();
+  const dias = Array.from({ length: Number(fim.slice(8)) }, (_, i) => {
+    const d = i + 1, iso = R.iso(comp.ano, comp.mes, d), min = porDia.get(d) || 0, a = ausDe(iso), fer = D.feriados[iso];
+    const cls = min ? 'ok' : iso > HOJE_ISO ? 'futuro' : fer ? 'feriado' : (prim + i) % 7 % 6 === 0 ? 'fds' : a ? 'ausente' : 'falta';
+    const rot = fer || (a ? R.TIPOS[a.tipo] : cls === 'falta' ? 'Sem ponto' : '');
+    return `<button class="dia ${cls}${iso === HOJE_ISO ? ' hoje' : ''}" aria-pressed="${F.pontoDia === d}" onclick="filtro('pontoDia', ${F.pontoDia === d ? 0 : d})" title="${dataBR(iso)}${rot ? ' · ' + esc(rot) : ''}">
+      <b>${d}</b><strong>${min ? hh(min) : '·'}</strong><small>${esc(rot)}</small></button>`;
+  }).join('');
+  const porProj = new Map();
+  for (const x of l) porProj.set(chaveProj(x), { rot: x.p == null ? `${x.projeto} (fora da lista)` : x.projeto, min: (porProj.get(chaveProj(x))?.min || 0) + x.min });
+  if (F.pontoProj && !porProj.has(F.pontoProj)) F.pontoProj = '';
+  const lista = l.filter(x => (!F.pontoProj || chaveProj(x) === F.pontoProj) && (!F.pontoDia || x.d === F.pontoDia));
+  return topo + `<div class="kpis">
+      ${kpi('horas', 'Apontado no mês', `${num(Math.round(total / 60))}<small> h</small>`, `${l.length} apontamento(s)`)}
+      ${kpi('fechamento', 'Previsto até hoje', `${num(prev / 60)}<small> h</small>`, 'Dias úteis × 8 h')}
+      ${kpi('relatorios', 'Diferença', sinal(total - prev), total < prev ? 'Abaixo do previsto' : total > prev ? 'Acima do previsto' : 'No previsto')}
+      ${kpi('alerta', 'Dias úteis sem ponto', num(semPonto.length, true), semExplicar.length ? `${semExplicar.length} sem ausência registrada` : semPonto.length ? 'Todos com ausência registrada' : 'Nenhum até hoje')}
+    </div>
+    <div class="filtros">${escolher}
+      <label>Projeto<select onchange="filtro('pontoProj', this.value)"><option value="">Todos os projetos</option>${[...porProj].map(([k, v]) => `<option value="${esc(k)}" ${k === F.pontoProj ? 'selected' : ''}>${esc(v.rot)}</option>`).join('')}</select></label>
+    </div>
+    ${semExplicar.length ? `<div class="aviso ambar" style="margin:0 0 18px"><b>● ${semExplicar.length} dia(s) útil(eis) sem ponto e sem ausência registrada</b><br>${semExplicar.map(iso => `${iso.slice(8)}/${iso.slice(5, 7)}`).join(', ')}. O ponto é lançado pela pessoa no AudiHoras; se foi falta, férias ou licença, <button class="link" data-colab="${c.id}" onclick="irRegistrar(this.dataset.colab)">registre a ausência</button>.</div>` : ''}
+    <div class="grid2">
+      <section class="card"><div class="card-cab"><div><h2>${esc(c.nome)} · ${nomeMes()}</h2><p class="sub">Clique num dia para ver só os apontamentos dele</p></div>
+        <div class="legenda cal-leg"><span><i class="ok"></i>Com ponto</span><span><i class="falta"></i>Sem ponto</span><span><i class="ausente"></i>Ausência registrada</span><span><i class="fds"></i>Fim de semana, feriado ou futuro</span></div></div>
+        <div class="cal">${SEMANA.map(s => `<div class="cal-dow">${s}</div>`).join('')}${'<div></div>'.repeat(prim)}${dias}</div></section>
+      <section class="card"><h2>Horas por projeto</h2><p class="sub">${nomeMes()} · cada projeto separado</p><br>
+        ${barrasH([...porProj.values()].sort((a, b) => b.min - a.min))}</section>
+    </div>
+    <section class="card"><div class="card-cab"><div><h2>Apontamentos ${F.pontoDia ? `de ${p2(F.pontoDia)}/${p2(comp.mes)}` : `de ${mesTxt}`}</h2><p class="sub">${consulta()} Para corrigir um apontamento, a pessoa usa o AudiHoras.</p></div>
+        ${F.pontoDia ? '<button class="btn-sec mini-btn" onclick="filtro(\'pontoDia\', 0)">Ver o mês inteiro</button>' : ''}</div>
+      ${tabelaApontamentos(lista)}</section>`;
+}
+
 // ---------- Fechamento Mensal ----------
 function fechamento(arg) {
-  const mp = meus(true);
-  const topo = cab('Controle mensal', 'Fechamento Mensal', 'Selecione projeto e competência, confira horas e ausências e aprove.');
-  if (!mp.length) return topo + `<div class="card vazio">${SEM_DADOS}</div>`;
+  // Na lista ficam os projetos com horas na competência, ou com fechamento já mexido nela; o resto é histórico.
+  const comHoras = new Set(doMes().map(l => l.p));
+  const mp = meus(true).filter(p => F.historico || p.id === Number(arg) || comHoras.has(p.id) || D.fechamentos[R.chave(comp.ano, comp.mes, p.id)]);
+  const topo = cab('Controle mensal', 'Fechamento Mensal', 'Selecione projeto e competência, confira horas e ausências, dê o OK em cada recurso e aprove.');
+  if (!mp.length) return topo + `<div class="card vazio">Nenhum projeto com horas em ${nomeMes()}.<br><br><button class="btn-sec" onclick="filtro('historico', true)">Ver também os projetos sem horas no mês</button></div>`;
   const p = mp.find(x => x.id === Number(arg)) || mp.find(x => x.id === F.fecProj) || mp[0];
   F.fecProj = p.id;
   const f = fechDe(p.id), calc = calcFech(p.id), aprovado = f.status === 'aprovado', alt = alterados(p.id);
@@ -922,13 +1220,23 @@ function fechamento(arg) {
   const idx = ordem.indexOf(f.status);
   const desc = { preparacao: 'Horas ainda não conferidas', reaberto: 'Reaberto para nova conferência', conferencia: 'Gerente analisando horas e ausências', aprovado: 'Competência validada' };
   const passos = ordem.map((st, i) => `<div class="passo ${i < idx ? 'feito' : i === idx ? 'atual' : ''}"><b>${i + 1}. ${R.STATUS_FEC[st]}</b>${desc[st]}</div>`).join('');
-  const conf = f.conferidos || {}, nOk = calc.linhas.filter(l => conf[l.c]).length;
+  const conf = f.conferidos || {}, val = f.validacoes || {}, nOk = calc.linhas.filter(l => conf[l.c]).length;
+  // Validação do recurso: depois do OK, finalizar registra, gera o PDF e manda o e-mail. Enviado não vai de novo sozinho.
+  const validacao = c => {
+    const v = val[c], pdf = v && `<a class="link" href="/api/validacao/${v.docId}" target="_blank" rel="noopener">PDF</a>`;
+    if (!conf[c]) return '<span class="apagado">Depois do OK</span>';
+    if (!v) return `<button class="btn-sec mini-btn" onclick="validarDlg(${p.id}, [${c}])">Finalizar e enviar</button>`;
+    if (v.envio.status === 'enviado') return `${pill('Enviado', 'fec-aprovado')}<small>${dataHora(v.envio.em)} · ${pdf} · <button class="link" onclick="validarDlg(${p.id}, [${c}], true)">Reenviar</button></small>`;
+    return `${pill(v.envio.status === 'falhou' ? 'Envio falhou' : 'Aguardando envio', 'fec-conferencia')}<small>${esc(v.envio.erro)}</small><small>${pdf} · <button class="link" onclick="validarDlg(${p.id}, [${c}])">Enviar agora</button></small>`;
+  };
+  const aEnviar = calc.linhas.filter(l => conf[l.c] && val[l.c]?.envio.status !== 'enviado').map(l => l.c);
   const linhas = calc.linhas.sort((a, b) => b.projeto - a.projeto).map(l => ({ chave: `fe${p.id}-${l.c}`, extra: horasDaPessoa(l.c), c: [
     `${pessoa(l.c, true)}${alt.includes(l.c) ? ' <span class="tag t-falta">mudou no AudiHoras</span>' : ''}`,
     `<b>${hh(l.projeto)}</b>`, hh(l.total), hh(l.previsto), `<span class="${l.dif < 0 ? 'neg' : l.dif > 0 ? 'pos' : ''}">${sinal(l.dif)}</span>`,
     l.ausencias.map(x => tag(x.r.tipo)).join(' ') || '·',
-    conf[l.c] ? `<button class="btn-ok feito" ${aprovado ? 'disabled' : ''} title="Conferido por ${esc(conf[l.c].por)} em ${dataHora(conf[l.c].em)}" onclick="conferirPessoa(${p.id}, ${l.c}, false)">✓ OK</button>`
-      : `<button class="btn-ok" ${aprovado ? 'disabled' : ''} onclick="conferirPessoa(${p.id}, ${l.c}, true)">OK</button>`] }));
+    conf[l.c] ? `<button class="btn-ok feito" ${aprovado || val[l.c] ? 'disabled' : ''} title="Conferido por ${esc(conf[l.c].por)} em ${dataHora(conf[l.c].em)}" onclick="conferirPessoa(${p.id}, ${l.c}, false)">✓ OK</button>`
+      : `<button class="btn-ok" ${aprovado ? 'disabled' : ''} onclick="conferirPessoa(${p.id}, ${l.c}, true)">OK</button>`,
+    validacao(l.c)] }));
   const tot = k => calc.linhas.reduce((t, l) => t + l[k], 0);
   const aus = calc.linhas.flatMap(l => l.ausencias.map(x => [
     pessoa(l.c), `${tag(x.r.tipo)} ${pillReg(x.r.status)}`, periodo(x.r), x.dias,
@@ -951,10 +1259,11 @@ function fechamento(arg) {
       <div class="somente-leitura" style="margin-bottom:0">🔒 ${consulta()} Achou apontamento incorreto? A correção é feita no AudiHoras; depois&nbsp;<button class="link" onclick="carregar(true)">atualize os dados</button>.</div>
       ${avisos.join('')}
     </section>
-    <section class="card"><div class="card-cab"><div><h2>Horas por profissional</h2><p class="sub">Clique no nome para ver as horas da pessoa em cada projeto e marque OK quando estiver certo. Previsto = ${calc.base / 480} dias úteis até hoje × 8 h, menos as ausências que você decidiu deduzir.</p></div>
-        ${calc.linhas.length ? pill(`${nOk} de ${calc.linhas.length} com OK`, nOk === calc.linhas.length ? 'fec-aprovado' : 'fec-conferencia') : ''}</div>
-      ${tabela(['Profissional', { t: 'Horas no projeto', num: 1 }, { t: 'Total no mês', num: 1 }, { t: 'Previsto', num: 1 }, { t: 'Diferença', num: 1 }, 'Ausências', 'Conferido'], linhas,
-        { vazio: 'Ninguém apontou horas neste projeto na competência.', rodape: ['Total', hh(tot('projeto')), hh(tot('total')), hh(tot('previsto')), sinal(tot('dif')), '', `${nOk}/${calc.linhas.length}`] })}</section>
+    <section class="card"><div class="card-cab"><div><h2>Horas por profissional</h2><p class="sub">Clique no nome para ver as horas da pessoa em cada projeto e marque OK quando estiver certo. Depois do OK, finalize: o ACCOUNT gera o PDF da validação e envia por e-mail. Previsto = ${calc.base / 480} dias úteis até hoje × 8 h, menos as ausências que você decidiu deduzir.</p></div>
+        <div class="acoes">${calc.linhas.length ? pill(`${nOk} de ${calc.linhas.length} com OK`, nOk === calc.linhas.length ? 'fec-aprovado' : 'fec-conferencia') : ''}
+          ${aEnviar.length > 1 ? `<button class="btn-sec mini-btn" onclick="validarDlg(${p.id}, [${aEnviar}])">Finalizar e enviar os ${aEnviar.length} com OK</button>` : ''}</div></div>
+      ${tabela(['Profissional', { t: 'Horas no projeto', num: 1 }, { t: 'Total no mês', num: 1 }, { t: 'Previsto', num: 1 }, { t: 'Diferença', num: 1 }, 'Ausências', 'Conferido', 'Validação'], linhas,
+        { vazio: 'Ninguém apontou horas neste projeto na competência.', rodape: ['Total', hh(tot('projeto')), hh(tot('total')), hh(tot('previsto')), sinal(tot('dif')), '', `${nOk}/${calc.linhas.length}`, ''] })}</section>
     <section class="card"><h2>Ausências da competência</h2><p class="sub">Nenhuma dedução é automática: decida cada caso olhando o que já está no AudiHoras</p><br>
       ${tabela(['Profissional', 'Ausência', 'Período', { t: 'Dias no mês', num: 1 }, 'No AudiHoras', 'Decisão'], aus, { vazio: 'Nenhuma ausência registrada para a equipe deste projeto na competência.' })}
       <div class="acoes" style="margin-top:16px;justify-content:flex-end">${acoes}</div></section>
@@ -996,6 +1305,22 @@ async function conferirPessoa(pid, c, ok) {
     D.fechamentos[R.chave(comp.ano, comp.mes, pid)] = await api('/api/fechamentos/conferido', { method: 'POST', body: { ano: comp.ano, mes: comp.mes, projetoId: pid, colabId: c, ok } });
     render(false);
   } catch (e) { if (!e.silencioso) aviso(e.message, true); }
+}
+function validarDlg(pid, ids, reenviar = false) {
+  const para = D.validacao?.para || [], chave = R.chave(comp.ano, comp.mes, pid);
+  dialogo(reenviar ? 'Enviar a validação de novo' : 'Finalizar a validação', `<p><b>${esc(ids.map(nomeColab).join(', '))}</b> · ${esc(proj(pid).nome)} · ${nomeMes()}</p>
+    <p>O ACCOUNT registra a validação, gera um PDF com as horas conferidas e envia por e-mail${para.length ? ` para <b>${esc(para.join(', '))}</b>` : ''}, com a mensagem de que o recurso foi validado e está tudo OK.</p>
+    ${!para.length ? '<p class="neg">O administrador ainda não informou o endereço de destino. A validação fica registrada, com o PDF para baixar, e o e-mail sai depois, pelo botão "Enviar agora".</p>'
+      : !D.validacao.ligado ? '<p class="neg">O envio de e-mail ainda não foi ligado no servidor. A validação fica registrada, com o PDF para baixar, e o e-mail sai depois, pelo botão "Enviar agora".</p>' : ''}
+    ${reenviar ? '<p class="neg">Esta validação já foi enviada. Confirmar manda outro e-mail, com um documento novo.</p>' : ''}`, {
+    ok: reenviar ? 'Enviar de novo' : 'Finalizar e enviar',
+    enviar: async () => {
+      const f = D.fechamentos[chave] = await api('/api/fechamentos/validar', { method: 'POST', body: { ano: comp.ano, mes: comp.mes, projetoId: pid, colabIds: ids, reenviar } });
+      render(false);
+      const envio = f.validacoes[ids[0]].envio;
+      aviso(envio.status === 'enviado' ? 'Validação registrada e e-mail enviado.' : `Validação registrada. O e-mail não saiu: ${envio.erro}`, envio.status !== 'enviado');
+    },
+  });
 }
 async function decidirAusencia(pid, registroId, decisao) {
   try {
@@ -1195,18 +1520,20 @@ function historicoRegistro(id) {
     <ul class="historico inteiro">${r.historico.slice().reverse().map(h => `<li>${pillReg(h.status)} <b>${esc(h.por)}</b> · ${dataHora(h.em)}${h.obs ? ' · ' + esc(h.obs) : ''}</li>`).join('')}</ul>`, { somenteFechar: true });
 }
 function cofre() {
-  const docs = RHD.registros.filter(r => r.arquivo).sort((a, b) => (b.arquivo.em || b.em).localeCompare(a.arquivo.em || a.em));
+  // O RH vê os documentos de todas as equipes; o gerente com a permissão, só os da própria.
+  const rh = tem('rh'), regs = rh ? RHD.registros : D.registros;
+  const docs = regs.filter(r => r.arquivo).sort((a, b) => (b.arquivo.em || b.em).localeCompare(a.arquivo.em || a.em));
   const total = docs.reduce((t, r) => t + r.arquivo.tamanho, 0);
   const linhas = docs.map(r => ({ a: `data-busca="${esc(r.colab.toLowerCase())}"`, c: [
     `<b>${esc(r.colab)}</b>`, tag(r.tipo), periodo(r), `${esc(r.arquivo.nome)}<small>${Math.ceil(r.arquivo.tamanho / 1024)} KB</small>`, pillReg(r.status),
     dataHora(r.arquivo.em || r.em), `<a class="btn-sec mini-btn" href="/api/arquivo/${r.arquivo.id}" target="_blank" rel="noopener">🔒 Abrir</a>`] }));
-  return cab('RH autorizado', 'Cofre de documentos', 'Atestados e comprovantes, restritos ao RH autorizado.')
+  return cab(rh ? 'RH autorizado' : 'Sua equipe', 'Cofre de documentos', rh ? 'Atestados e comprovantes de todas as equipes.' : 'Atestados, comprovantes e prints da sua equipe, para consultar e baixar.')
     + `<div class="kpis">
-        ${kpi('cofre', 'Documentos no cofre', num(docs.length, true), 'Guardados cifrados')}
-        ${kpi('alerta', 'Atestados e licenças sem documento', num(RHD.registros.filter(r => MEDICO(r.tipo) && !r.arquivo && r.status !== 'cancelada').length, true), 'Anexe em Validação')}
+        ${kpi('cofre', 'Documentos no cofre', num(docs.length, true), rh ? 'Guardados cifrados' : 'Da sua equipe')}
+        ${kpi('alerta', 'Atestados e licenças sem documento', num(regs.filter(r => MEDICO(r.tipo) && !r.documento && !r.arquivo && r.status !== 'cancelada').length, true), rh ? 'Anexe em Validação' : 'Quem anexa é o RH')}
         ${kpi('disco', 'Espaço usado', `${num(Math.ceil(total / 1024))}<small> KB</small>`, `Limite de ${LIMITE_DOC / 1e6} MB por arquivo`)}
       </div>
-      <div class="aviso azul" style="margin:0 0 18px"><b>● Sigilo médico</b><br>Armazenamento privado e cifrado, sem links públicos. Cada abertura fica registrada na auditoria. Gerentes veem só que o documento existe. Política de retenção e descarte: a definir com RH e LGPD.</div>
+      <div class="aviso azul" style="margin:0 0 18px"><b>● Sigilo médico</b><br>Armazenamento privado e cifrado, sem links públicos. Cada abertura fica registrada na auditoria. O RH vê todos os documentos; o gerente de contas autorizado, só os da própria equipe. Política de retenção e descarte: a definir com RH e LGPD.</div>
       <div class="filtros"><label>Buscar profissional<input type="search" placeholder="Nome" oninput="buscar(this.value)"></label></div>
       <section class="card">${tabela(['Profissional', 'Documento', 'Período', 'Arquivo', 'Situação', 'Guardado em', ''], linhas, { vazio: 'Nenhum documento no cofre.' })}</section>`;
 }
@@ -1215,7 +1542,7 @@ function cofre() {
 function usuarios() {
   const us = ADM.usuarios, n = st => us.filter(u => u.status === st).length;
   const linhas = us.map(u => ({ a: `data-busca="${esc(`${u.nome} ${u.email}`.toLowerCase())}"`, c: [
-    `<b>${esc(u.nome)}</b><small>${esc(u.email)}</small>`, R.PERFIS[u.perfil], pillUsr(u.status), `${esc(u.vinculo)}${u.audihoras ? '<small>definido pelo administrador</small>' : '<small>pelo e-mail</small>'}`, u.ultimoAcesso ? dataHora(u.ultimoAcesso) : 'Nunca',
+    `<b>${esc(u.nome)}</b><small>${esc(u.email)}</small>`, `${R.PERFIS[u.perfil]}${u.perfil === 'gerente' && !u.cofre ? '<small>sem abrir o cofre</small>' : ''}`, pillUsr(u.status), `${esc(u.vinculo)}${u.audihoras ? '<small>definido pelo administrador</small>' : '<small>pelo e-mail</small>'}`, u.ultimoAcesso ? dataHora(u.ultimoAcesso) : 'Nunca',
     '<div class="acoes-linha">' + [`<button class="link" onclick="editarUsuarioDlg('${u.id}')">Editar</button>`,
       u.email !== EU.email && (u.status === 'bloqueado' ? `<button class="link" onclick="statusUsuario('${u.id}', 'ativo')">Reativar</button>` : `<button class="link perigo" onclick="statusUsuario('${u.id}', 'bloqueado')">Bloquear</button>`),
     ].filter(Boolean).join('') + '</div>'] }));
@@ -1248,6 +1575,7 @@ function editarUsuarioDlg(id) {
   dialogo(`Editar ${esc(u.nome)}`, `<label class="inteiro">Nome<input name="nome" required maxlength="100" value="${esc(u.nome)}"></label>
     <label class="inteiro">Perfil<select name="perfil">${opcoes(R.PERFIS, u.perfil)}</select></label>
     <label class="inteiro">Usuário do AudiHoras (opcional)<input name="audihoras" maxlength="60" autocomplete="off" autocapitalize="none" spellcheck="false" value="${esc(u.audihoras)}" placeholder="${esc(u.email.split('@')[0])} (começo do e-mail)"></label>
+    <label class="inteiro">Cofre de documentos (vale para o perfil Gerente de Contas)<select name="cofre"><option value="sim" ${u.cofre ? 'selected' : ''}>Pode baixar os documentos da própria equipe</option><option value="nao" ${u.cofre ? '' : 'selected'}>Não abre documentos</option></select></label>
     <p class="dica">E-mail: ${esc(u.email)}. Deixe vazio para usar o começo do e-mail; preencha só quando o usuário da pessoa no AudiHoras for diferente. Não é a senha.</p>`, {
     enviar: async fd => {
       await api(`/api/usuarios/${id}`, { method: 'POST', body: Object.fromEntries(fd) });
@@ -1276,7 +1604,10 @@ const ACOES = {
   ausencia_validada: 'Ausência validada', ausencia_cancelada: 'Ausência cancelada', documento_anexado: 'Documento anexado',
   documento_aberto: 'Documento médico aberto', projeto_atualizado: 'Ficha de projeto', alocacao_incluida: 'Alocação incluída',
   alocacao_removida: 'Alocação removida', fechamento_conferir: 'Conferência iniciada', fechamento_aprovar: 'Fechamento aprovado',
-  fechamento_reabrir: 'Fechamento reaberto', fechamento_decisao: 'Decisão de ausência',
+  fechamento_reabrir: 'Fechamento reaberto', fechamento_decisao: 'Decisão de ausência', fechamento_pessoa: 'OK no profissional',
+  validacao_enviado: 'Validação enviada por e-mail', validacao_pendente: 'Validação aguardando envio', validacao_falhou: 'Envio da validação falhou',
+  config_email: 'Destino das validações', config_email_teste: 'E-mail de teste', conta_criada: 'Conta criada', conta_atualizada: 'Ficha de conta', conta_excluida: 'Conta excluída',
+  projeto_criado: 'Projeto criado', projeto_excluido: 'Projeto excluído', projeto_ligado: 'Projeto ligado ao AudiHoras', projeto_equipe: 'Equipe do projeto', projeto_checklist: 'Checklist do projeto',
 };
 function auditoria() {
   const linhas = AUD.map(a => ({ a: `data-busca="${esc(`${a.por} ${a.acao} ${ACOES[a.acao] || ''} ${a.detalhe}`.toLowerCase())}"`, c: [
@@ -1284,6 +1615,39 @@ function auditoria() {
   return cab('Administração', 'Auditoria', 'Acessos, perfis, vínculos, ausências, fechamentos e aberturas de documentos restritos (últimos 1.000 eventos).')
     + `<div class="filtros"><label>Buscar<input type="search" placeholder="Pessoa, ação ou detalhe" oninput="buscar(this.value)"></label></div>
       <section class="card">${tabela(['Quando', 'Quem', 'Ação', 'Detalhe'], linhas, { vazio: 'Nenhum evento registrado.' })}</section>`;
+}
+
+// ---------- E-mails das validações ----------
+function envios() {
+  const sit = { enviado: ['Enviado', 'fec-aprovado'], pendente: ['Aguardando envio', 'fec-conferencia'], falhou: ['Falhou', 'fec-reaberto'] };
+  const linhas = CFG.envios.map(e => [dataHora(e.em), esc(e.por), e.recursos.map(esc).join(', '), esc(e.assunto), e.para.map(esc).join(', ') || '·', `${pill(...sit[e.status])}${e.erro ? `<small>${esc(e.erro)}</small>` : ''}`]);
+  return cab('Administração', 'E-mails das validações', 'Para onde vai o documento quando um gerente finaliza a validação de um recurso no fechamento.')
+    + `<section class="card"><h2>Endereço de destino</h2><p class="sub">Quem recebe o e-mail com o PDF da validação. Até 5 endereços, separados por vírgula.</p><br>
+        <form class="form" onsubmit="salvarConfig(event, this)">
+          <label class="largo">E-mail de destino<input name="emailValidacao" maxlength="400" value="${esc(CFG.emailValidacao.join(', '))}" placeholder="financeiro@auditeste.com.br"></label>
+          <button class="btn">Salvar</button>
+          <button type="button" class="btn-sec" onclick="testarEmail(this)">Enviar e-mail de teste</button>
+        </form>
+        <div class="aviso ${CFG.envioLigado ? '' : 'ambar'}">${CFG.envioLigado ? `<b>● Envio ligado</b><br>Os e-mails saem de ${esc(CFG.remetente)}.`
+          : '<b>● Envio ainda não ligado no servidor</b><br>Falta informar a conta que envia, nas variáveis do servidor: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS e EMAIL_FROM. Até lá, cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando.'}</div></section>
+      <section class="card"><h2>Últimos envios</h2><p class="sub">Cada validação finalizada no fechamento (as 200 mais recentes)</p><br>
+        ${tabela(['Quando', 'Quem validou', 'Recursos', 'Assunto', 'Para', 'Situação'], linhas, { vazio: 'Nenhuma validação finalizada ainda.' })}</section>`;
+}
+async function salvarConfig(ev, f) {
+  ev.preventDefault();
+  try {
+    CFG = await api('/api/config', { method: 'POST', body: { emailValidacao: f.emailValidacao.value } });
+    render(false);
+    aviso('Endereço de destino salvo.');
+  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
+}
+async function testarEmail(b) {
+  b.disabled = true;
+  try {
+    CFG = await api('/api/config/teste', { method: 'POST' });
+    aviso('E-mail de teste enviado.');
+  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
+  b.disabled = false;
 }
 
 // ---------- Financeiro ----------

@@ -21,18 +21,18 @@ exports.responder = (servico, b) => {
   const token = crypto.randomUUID(), sessao = atual[1];
   sessoes.delete(atual[0]);
   const ok = d => { sessoes.set(token, sessao); return { rc: true, detalhe: typeof d === 'string' ? d : JSON.stringify(d), token }; };
-  const colab = M.EQUIPE.find(e => e.id === sessao.lid);
+  const colab = sessao.lid ? M.EQUIPE.find(e => e.id === sessao.lid) : M.GESTOR; // 0 é o próprio gestor
 
   switch (servico) {
     case 'SetLiderado': sessao.lid = b.idLiderado; return ok('ok');
     // Como no site (ShowImg.js): a foto vem fora do "detalhe", em base64.
     case 'GetColaboradorFoto': sessoes.set(token, sessao); return { rc: true, foto: M.foto(b.IdLiderado), token };
     // Como no real: a lista é a de quem está em foco. O gestor sozinho só vê os internos, não os projetos de cliente da equipe.
-    case 'Projetos': return ok(M.PROJETOS.filter(p => p.Natureza !== 1 || (colab && (p === colab.projeto || p === colab.extra))));
+    case 'Projetos': return ok(M.PROJETOS.filter(p => p.Natureza !== 1 || p === colab?.projeto || p === colab?.extra || p === colab?.antes));
     case 'GetColaboradores': {
       const hoje = new Date();
       return ok({
-        nomeGerente: 'Gestor Demonstração',
+        nomeGerente: M.GESTOR.nome,
         dadosColaboradores: M.EQUIPE.map(e => ({
           idColaborador: e.id, nomeColaborador: e.nome, ativo: e.ativo, dataUltLancamento: M.ultimoDoMes(e),
           qtdHoras: somaHoras(M.doMes(e, hoje.getFullYear(), hoje.getMonth() + 1)),
@@ -42,7 +42,7 @@ exports.responder = (servico, b) => {
     case 'MesAtual': {
       const l = colab ? M.doMes(colab, b.Ano, b.Mes) : [];
       return ok({
-        mes: b.Mes, ano: b.Ano, mesTxt: M.MESES[b.Mes - 1], nomeColaborador: colab?.nome || 'Gestor Demonstração', total: somaHoras(l),
+        mes: b.Mes, ano: b.Ano, mesTxt: M.MESES[b.Mes - 1], nomeColaborador: colab?.nome, total: somaHoras(l),
         dadosdia: Array.from({ length: new Date(b.Ano, b.Mes, 0).getDate() }, (_, i) => ({
           dia: i + 1, diasemana: M.SEMANA[new Date(b.Ano, b.Mes - 1, i + 1).getDay()],
           qtdhoras: somaHoras(l.filter(x => x.dia === i + 1)), feriado: M.FERIADOS[`${b.Ano}-${b.Mes}-${i + 1}`] || '',

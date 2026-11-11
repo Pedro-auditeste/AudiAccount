@@ -46,6 +46,17 @@ async function liderado(ah, id) {
   if (ah.liderado !== id) await chamar(ah, 'SetLiderado', { idLiderado: id });
   ah.liderado = id;
 }
+// O gestor também aponta horas (gestão de contas, por exemplo), mas o AudiHoras só lista os liderados dele.
+// Ele entra na equipe com um número negativo que sai do usuário: não bate com colaborador nem com outro gestor.
+const idGestor = usuario => -(parseInt(md5(usuario).slice(0, 7), 16) + 1);
+const foco = id => (id < 0 ? 0 : id); // no AudiHoras, 0 é o próprio gestor
+const pesquisa = (ah, id, ano) => cache(ah, `pesq:${id}:${ano}`, async () => {
+  await liderado(ah, foco(id));
+  return chamar(ah, 'PesquisaApontamentos', { Mes: 0, Ano: ano, IdProjeto: 0, IdAtividade: 0, Observacao: '' });
+});
+// projAtivObs é "Projeto / Atividade / Observação" (sem o Id): casa pelo nome de projeto mais longo seguido de "/".
+const maisLongoPrimeiro = (projetos, nome) => [...projetos].sort((a, b) => nome(b).length - nome(a).length);
+const doProjeto = (texto, nome) => texto.startsWith(nome) && /^\s*(\/|$)/.test(texto.slice(nome.length));
 
 async function conectar(api, usuario, senha) {
   if (!usuario || !senha) throw falha(400, 'Informe usuário e senha do AudiHoras');
@@ -90,12 +101,15 @@ async function coletar(ah, ano, mes) {
     const colab = await cache(ah, 'equipe', () => chamar(ah, 'GetColaboradores', { MesAnterior: false }));
     const equipe = colab.dadosColaboradores.filter(c => c.ativo)
       .map(c => ({ id: c.idColaborador, nome: c.nomeColaborador, ultimo: c.dataUltLancamento }));
+    // O próprio gestor, a não ser que o AudiHoras já o traga entre os liderados.
+    const gestor = String(colab.nomeGerente || ah.usuario).trim();
+    if (!equipe.some(c => c.nome.trim().toLowerCase() === gestor.toLowerCase())) equipe.unshift({ id: idGestor(ah.usuario), nome: gestor, gestor: true });
 
     // Projetos devolve os projetos de quem está em foco: os do gestor não trazem os projetos de cliente da equipe
     // (visto com um gestor real em 02/10/2026). Então o catálogo junta também os de cada liderado, mês a mês.
     const apontamentos = [];
     for (const c of equipe) {
-      for (const j of janela) {
+      for (const j of c.gestor ? [] : janela) { // os do gestor já vieram acima
         const ult = new Date(j.ano, j.mes, 0).getDate();
         const ps = await cache(ah, `proj:${c.id}:${j.ano}-${j.mes}`, async () => {
           await liderado(ah, c.id);
@@ -104,17 +118,14 @@ async function coletar(ah, ano, mes) {
         for (const p of ps) catalogo.set(p.Id, p);
       }
       for (const a of new Set(janela.map(j => j.ano))) {
-        const r = await cache(ah, `pesq:${c.id}:${a}`, async () => {
-          await liderado(ah, c.id);
-          return chamar(ah, 'PesquisaApontamentos', { Mes: 0, Ano: a, IdProjeto: 0, IdAtividade: 0, Observacao: '' });
-        });
+        // As horas do próprio gestor são um extra: se o AudiHoras não as entregar, a carteira abre sem ele.
+        const r = await pesquisa(ah, c.id, a).catch(e => { if (!c.gestor || e.extra?.expirou) throw e; c.semHoras = true; return {}; });
         for (const l of r.lancamentos || []) apontamentos.push({ c: c.id, l });
       }
     }
+    if (equipe[0].semHoras) { equipe.shift(); apontamentos.splice(0, apontamentos.length, ...apontamentos.filter(x => x.c > 0)); }
 
-    // projAtivObs é "Projeto / Atividade / Observação" (sem o Id): casa pelo nome de projeto mais longo seguido de "/".
-    const porNome = [...catalogo.values()].sort((a, b) => b.Nome.length - a.Nome.length);
-    const doProjeto = (texto, nome) => texto.startsWith(nome) && /^\s*(\/|$)/.test(texto.slice(nome.length));
+    const porNome = maisLongoPrimeiro(catalogo.values(), p => p.Nome);
     const naJanela = new Set(janela.map(j => `${j.ano}-${j.mes}`));
     const soma = new Map(), soltos = new Map(); // soltos: horas que não casaram com projeto nenhum, para avisar na tela
     for (const { c, l } of apontamentos) {
@@ -161,5 +172,24 @@ function dados(ah, ano, mes, atualizar) {
 function foto(ah, id) {
   return emFila(ah, () => cache(ah, `foto:${id}`, async () => (await chamar(ah, 'GetColaboradorFoto', { IdLiderado: id }, true)).foto || null, 12 * 3600e3));
 }
+// Apontamentos de uma pessoa num mês, um a um (início, fim, projeto, atividade e observação): a conferência que antes
+// pedia abrir o AudiHoras. Usa a mesma pesquisa que a coleta já guardou.
+function apontamentos(ah, id, ano, mes) {
+  return emFila(ah, async () => {
+    try {
+      const x = await cache(ah, `coleta:${ano}-${mes}`, () => coletar(ah, ano, mes));
+      const porNome = maisLongoPrimeiro(x.projetos, p => p.nome);
+      const r = await pesquisa(ah, id, ano);
+      return (r.lancamentos || []).filter(l => l.mes === mes && l.ano === ano).map(l => {
+        const texto = String(l.projAtivObs), p = porNome.find(p => doProjeto(texto, p.nome));
+        const [nome, ativ, ...obs] = (p ? '/' + texto.slice(p.nome.length).replace(/^\s*\//, '') : texto).split('/');
+        return { d: l.dia, inicio: l.inicio, final: l.final, min: minutos(l.qtdhoras), p: p ? p.id : null,
+          projeto: p ? p.nome : nome.trim(), atividade: (ativ || '').trim(), obs: obs.join('/').trim() };
+      }).sort((a, b) => a.d - b.d || String(a.inicio).localeCompare(String(b.inicio)));
+    } finally {
+      await liderado(ah, 0).catch(() => {});
+    }
+  });
+}
 
-module.exports = { chamar, conectar, dados, foto, falha, md5 };
+module.exports = { chamar, conectar, dados, foto, apontamentos, falha, md5 };

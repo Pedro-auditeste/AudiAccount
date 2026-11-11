@@ -2,11 +2,13 @@
 // O server.js liga isto à rede, ao disco e à criptografia; o test.js usa direto.
 (function (N) {
   const R = require('./public/regras.js');
+  const { pdf } = require('./envio.js');
   const falha = (status, msg, extra) => Object.assign(new Error(msg), { status, extra });
   N.falha = falha;
 
   // d = dependências de cada ambiente: { db, salvar, uuid, sessoes: { ler, gravar, apagar }, gravarDoc, lerDoc, apagarDoc,
-  //   conectarAH, dadosAH, fotoAH, maxDoc }. Sessões e documentos podem ser assíncronos (Redis na Vercel).
+  //   conectarAH, dadosAH, fotoAH, apontamentosAH, maxDoc, enviarEmail (só onde há SMTP configurado) }.
+  // Sessões e documentos podem ser assíncronos (Redis na Vercel).
   N.criar = d => {
     const { db } = d;
     const agora = () => new Date().toISOString();
@@ -15,6 +17,8 @@
     for (const u of db.usuarios) { if (u.status === 'convite') u.status = 'ativo'; delete u.senha; delete u.link; }
     delete db.pedidos;
     db.contas ||= {}; // ficha de cada conta (cliente): sobre o que é, tecnologias e contatos
+    db.config ||= {}; // emailValidacao: para onde vão as validações do fechamento
+    db.envios ||= []; // histórico dos e-mails de validação
 
     function auditar(s, acao, detalhe = '') {
       db.auditoria.push({ em: agora(), por: s ? `${s.u.nome} <${s.u.email}>` : 'sistema', acao, detalhe: String(detalhe).slice(0, 300) });
@@ -51,8 +55,10 @@
     }
     const publico = u => ({
       id: u.id, nome: u.nome, email: u.email, perfil: u.perfil, status: u.status, criadoEm: u.criadoEm,
-      ultimoAcesso: u.ultimoAcesso, audihoras: u.audihoras || '', vinculo: vinculoDe(u),
+      ultimoAcesso: u.ultimoAcesso, audihoras: u.audihoras || '', vinculo: vinculoDe(u), cofre: u.cofre !== false,
     });
+    // Documentos do cofre: o RH abre todos; o gerente, os da própria equipe, a não ser que o administrador tire.
+    const podeCofre = u => R.tem(u, 'rh') || (R.tem(u, 'gerente') && u.cofre !== false);
 
     // Sessão: { uid, criada, visto, ah }. Fica fora do banco (d.sessoes), porque muda a cada chamada ao AudiHoras.
     const OITO_HORAS = 8 * 3600e3;
@@ -120,11 +126,15 @@
       return ah;
     }
     // Carteira e equipe da competência em tela: é contra elas que as ações do gerente são validadas.
-    async function dados(ah, ano, mes, atualizar) {
-      const x = await d.dadosAH(ah, ano, mes, atualizar);
-      ah.meus = new Map(x.projetos.filter(R.ehProjeto).map(p => [p.id, p.nome]));
+    // Junto vão os projetos que o gerente criou no ACCOUNT (sem horas no AudiHoras).
+    async function dados(s, ano, mes, atualizar) {
+      const ah = s.ah, x = await d.dadosAH(ah, ano, mes, atualizar);
+      const manuais = Object.entries(db.projetos).filter(([, f]) => f.manual && f.dono === s.u.id)
+        .map(([id, f]) => ({ id: Number(id), nome: f.nome, natureza: 1, manual: true }));
+      const projetos = [...x.projetos, ...manuais];
+      ah.meus = new Map(projetos.filter(R.ehProjeto).map(p => [p.id, p.nome]));
       ah.equipe = new Map(x.equipe.map(c => [c.id, c.nome]));
-      return x;
+      return { ...x, projetos };
     }
 
     // ---------- Ausências e cofre ----------
@@ -176,17 +186,94 @@
       salvar();
       return r;
     }
-    // O gerente vê só metadados administrativos: nem o nome do arquivo do documento médico (RF-EQP-005).
-    const paraGerente = r => ({ ...r, arquivo: undefined, documento: !!r.arquivo });
+    // Gerente sem a permissão do cofre vê só metadados administrativos: nem o nome do arquivo (RF-EQP-005).
+    const paraGerente = (s, r) => ({ ...r, arquivo: podeCofre(s.u) ? r.arquivo : undefined, documento: !!r.arquivo });
 
     // ---------- Projetos ----------
     const ficha = pid => (db.projetos[pid] ||= { cliente: '', inicio: '', fim: '', status: 'ativo', referencia: '', obs: '' });
+    const nomeProjeto = (s, nome, menos) => {
+      nome = texto(nome, 120);
+      if (!nome) throw falha(400, 'Informe o nome do projeto');
+      if ([...s.ah.meus].some(([id, n]) => id !== menos && n.trim().toLowerCase() === nome.toLowerCase())) throw falha(409, 'Já existe um projeto com esse nome na sua carteira.');
+      return nome;
+    };
+    // Pessoas do projeto escolhidas à mão (além de quem aponta horas nele), cada uma com o papel dela ali.
+    // A mesma pessoa pode estar em vários projetos, com papéis diferentes.
+    const lerMembros = (s, lista) => (Array.isArray(lista) ? lista : []).slice(0, 100).map(m => {
+      const c = Number(m?.colabId);
+      if (!s.ah.equipe?.has(c)) throw falha(403, 'Profissional fora da sua equipe');
+      return { c, papel: texto(m.papel, 60) };
+    }).filter((m, i, l) => l.findIndex(x => x.c === m.c) === i);
+    // Projeto criado no ACCOUNT: para organizar equipe e pendências de um trabalho que ainda não está no AudiHoras.
+    // O número dele começa em 9 trilhões, bem longe dos códigos do AudiHoras (que passam de 600 milhões).
+    function criarProjeto(s, b) {
+      exigeAH(s);
+      if (!s.ah.meus || !s.ah.equipe) throw falha(409, 'Abra a carteira antes de criar um projeto.');
+      const nome = nomeProjeto(s, b.nome), id = db.seqProjeto = Math.max(db.seqProjeto || 0, 9e12) + 1;
+      db.projetos[id] = {
+        manual: true, dono: s.u.id, nome, cliente: texto(b.cliente, 120), inicio: '', fim: '', status: 'ativo', referencia: '', obs: '',
+        descricao: texto(b.descricao, 2000), membros: lerMembros(s, b.membros), checklist: [], atualizadoPor: s.u.nome, atualizadoEm: agora(),
+      };
+      s.ah.meus.set(id, nome);
+      auditar(s, 'projeto_criado', nome);
+      salvar();
+      return { id, nome, ficha: db.projetos[id] };
+    }
+    function tirarManual(s, pid) {
+      const f = db.projetos[pid];
+      if (!f?.manual || f.dono !== s.u.id) throw falha(403, 'Só vale para um projeto criado por você no ACCOUNT.');
+      delete db.projetos[pid];
+      for (const k of Object.keys(db.fechamentos)) if (k.endsWith('|' + pid)) delete db.fechamentos[k];
+      s.ah.meus.delete(pid);
+      return f;
+    }
+    function apagarProjeto(s, pid) {
+      exigeProjeto(s, pid);
+      auditar(s, 'projeto_excluido', tirarManual(s, pid).nome);
+      salvar();
+      return {};
+    }
+    // O projeto criado no ACCOUNT passou a existir no AudiHoras: equipe, checklist e ficha vão para o de lá.
+    function ligarProjeto(s, pid, b) {
+      const ah = exigeProjeto(s, pid), alvo = Number(b.alvo);
+      if (alvo === pid || !ah.meus.has(alvo) || db.projetos[alvo]?.manual) throw falha(400, 'Escolha um projeto do AudiHoras.');
+      const m = tirarManual(s, pid), f = ficha(alvo);
+      for (const k of ['cliente', 'inicio', 'fim', 'referencia', 'obs', 'descricao']) f[k] ||= m[k] || '';
+      f.membros = [...(f.membros || []), ...(m.membros || []).filter(x => !(f.membros || []).some(y => y.c === x.c))];
+      f.checklist = [...(f.checklist || []), ...(m.checklist || [])];
+      auditar(s, 'projeto_ligado', `${m.nome} → ${ah.meus.get(alvo)}`);
+      salvar();
+      return { id: alvo, ficha: f };
+    }
+    function membro(s, pid, b) {
+      const ah = exigeProjeto(s, pid), f = ficha(pid), [m] = lerMembros(s, [b]);
+      f.membros = (f.membros || []).filter(x => x.c !== m.c);
+      if (!b.remover) f.membros.push(m);
+      auditar(s, 'projeto_equipe', `${ah.meus.get(pid)}: ${ah.equipe.get(m.c)} ${b.remover ? 'saiu' : `entrou${m.papel ? ' como ' + m.papel : ''}`}`);
+      salvar();
+      return f;
+    }
+    function checklist(s, pid, b) {
+      const ah = exigeProjeto(s, pid), f = ficha(pid), lista = (f.checklist ||= []), item = lista.find(x => x.id === b.id);
+      if (b.acao === 'criar') {
+        if (!texto(b.texto)) throw falha(400, 'Escreva o item do checklist');
+        if (lista.length >= 100) throw falha(409, 'O checklist já tem 100 itens.');
+        lista.push({ id: d.uuid(), texto: texto(b.texto, 200), feito: false, por: s.u.nome, em: agora() });
+      } else if (!item) throw falha(404, 'Item não encontrado');
+      else if (b.acao === 'marcar') Object.assign(item, { feito: !!b.feito, feitoPor: b.feito ? s.u.nome : undefined, feitoEm: b.feito ? agora() : undefined });
+      else if (b.acao === 'apagar') lista.splice(lista.indexOf(item), 1);
+      else throw falha(400, 'Ação inválida');
+      auditar(s, 'projeto_checklist', `${ah.meus.get(pid)}: ${b.acao} "${item?.texto || texto(b.texto, 200)}"`);
+      salvar();
+      return f;
+    }
     function salvarFicha(s, pid, b) {
       const ah = exigeProjeto(s, pid);
       if (!R.STATUS_PRJ[b.status]) throw falha(400, 'Status inválido');
       for (const x of [b.inicio, b.fim]) if (x && !DATA.test(x)) throw falha(400, 'Vigência inválida');
       if (b.inicio && b.fim && b.inicio > b.fim) throw falha(400, 'A vigência termina antes de começar');
       const f = ficha(pid);
+      if (f.manual && b.nome !== undefined) ah.meus.set(pid, f.nome = nomeProjeto(s, b.nome, pid));
       Object.assign(f, {
         cliente: texto(b.cliente, 120), inicio: b.inicio || '', fim: b.fim || '', status: b.status,
         referencia: texto(b.referencia, 300), obs: texto(b.obs), descricao: texto(b.descricao, 2000), atualizadoPor: s.u.nome, atualizadoEm: agora(),
@@ -242,7 +329,7 @@
       if (!t[0].includes(f.status)) throw falha(409, `O fechamento está ${R.STATUS_FEC[f.status].toLowerCase()}; esta ação não se aplica.`);
       if (b.acao === 'reabrir' && !obs) throw falha(400, 'Informe o motivo da reabertura.');
       if (b.acao === 'aprovar') {
-        const x = await dados(ah, a, m);
+        const x = await dados(s, a, m);
         const calc = R.fechamento(x, doTime(s), pid, a, m, f);
         if (calc.pendentes) throw falha(409, 'Decida o tratamento de cada ausência antes de aprovar.');
         if (calc.divergencias && !obs) throw falha(409, 'Existem divergências que precisam ser avaliadas. Registre a justificativa para aprovar.');
@@ -264,12 +351,93 @@
       const ah = exigeProjeto(s, pid), f = fech(a, m, pid);
       if (f.status === 'aprovado') throw falha(409, 'Fechamento aprovado: reabra para alterar.');
       if (!ah.equipe?.has(c)) throw falha(403, 'Profissional fora da sua equipe');
+      if (!b.ok && f.validacoes?.[c]) throw falha(409, 'A validação deste recurso já foi finalizada. Para refazer, envie de novo.');
       f.conferidos ||= {};
       if (b.ok) f.conferidos[c] = { por: s.u.nome, em: agora() }; else delete f.conferidos[c];
       auditar(s, 'fechamento_pessoa', `${ah.meus.get(pid)} ${m}/${a}: ${ah.equipe.get(c)} ${b.ok ? 'conferido' : 'desmarcado'}`);
       salvar();
       return f;
     }
+    // Validação do recurso: depois do OK, o gerente finaliza. Fica o registro, sai um PDF com o que foi validado e o
+    // e-mail vai para o endereço que o administrador configurou. Recurso já enviado só vai de novo se o gerente pedir.
+    const emEnvio = new Set(); // envios em andamento neste servidor (na Vercel, a trava do banco já deixa um por vez)
+    const p2 = n => String(n).padStart(2, '0');
+    const horas = min => (min / 60).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' h';
+    const quando = iso => new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'short' });
+    const dataBR = iso => iso.split('-').reverse().join('/');
+    async function validarRecursos(s, b) {
+      const a = Number(b.ano), m = Number(b.mes), pid = Number(b.projetoId);
+      const ah = exigeProjeto(s, pid), f = fech(a, m, pid), ids = [...new Set((Array.isArray(b.colabIds) ? b.colabIds : []).map(Number))];
+      if (!ids.length) throw falha(400, 'Escolha ao menos um recurso.');
+      f.validacoes ||= {};
+      for (const c of ids) {
+        if (!f.conferidos?.[c]) throw falha(409, `Dê o OK em ${ah.equipe?.get(c) || 'cada recurso'} antes de finalizar.`);
+        if (f.validacoes[c]?.envio.status === 'enviado' && !b.reenviar) throw falha(409, `A validação de ${ah.equipe.get(c)} já foi enviada em ${quando(f.validacoes[c].envio.em)}.`, { jaEnviado: true });
+      }
+      const trava = ids.map(c => `${R.chave(a, m, pid)}|${c}`);
+      if (trava.some(k => emEnvio.has(k))) throw falha(409, 'Esse envio já está em andamento.');
+      trava.forEach(k => emEnvio.add(k));
+      try {
+        const x = await dados(s, a, m), calc = R.fechamento(x, doTime(s), pid, a, m, f);
+        const linhas = ids.map(c => calc.linhas.find(l => l.c === c));
+        if (linhas.some(l => !l)) throw falha(409, 'Só dá para validar quem tem horas neste projeto na competência.');
+        const projeto = ah.meus.get(pid), nomes = linhas.map(l => ah.equipe.get(l.c)), varios = ids.length > 1, em = agora();
+        const competencia = `${new Date(a, m - 1, 1).toLocaleString('pt-BR', { month: 'long' })} de ${a}`;
+        const arquivo = pdf([
+          { t: 'ACCOUNT · Gestão de Contas e Projetos', tam: 15, forte: true },
+          { t: `Registro de validação de recurso${varios ? 's' : ''}`, tam: 12, forte: true }, '',
+          `Projeto: ${projeto}${db.projetos[pid]?.manual ? '' : ` (ID AudiHoras ${pid})`}`,
+          ...(ficha(pid).cliente ? [`Conta: ${ficha(pid).cliente}`] : []),
+          `Competência: ${competencia}`, `Validado por: ${s.u.nome} <${s.u.email}>`, `Data da validação: ${quando(em)}`,
+          `Fonte das horas: AudiHoras, consulta de ${quando(x.consultadoEm)}`, '',
+          ...linhas.flatMap(l => [
+            { t: ah.equipe.get(l.c), tam: 11, forte: true },
+            `Horas no projeto: ${horas(l.projeto)}`,
+            `Total no mês, em todos os projetos: ${horas(l.total)} · previsto: ${horas(l.previsto)} · diferença: ${l.dif > 0 ? '+' : ''}${horas(l.dif)}`,
+            'Horas no projeto por dia: ' + x.lancamentos.filter(n => n.c === l.c && n.p === pid && n.a === a && n.m === m).sort((i, j) => i.d - j.d).map(n => `${p2(n.d)}/${p2(m)} ${horas(n.min)}`).join(' · '),
+            // O motivo médico não sai do ACCOUNT: no documento a ausência aparece sem o tipo.
+            ...l.ausencias.map(au => `Ausência: ${['atestado', 'licenca'].includes(au.r.tipo) ? 'justificada' : R.TIPOS[au.r.tipo].toLowerCase()}, ${dataBR(au.r.inicio)} a ${dataBR(au.r.fim)}, ${au.dias} dia(s) útil(eis) no mês · ${au.decisao ? R.DECISOES[au.decisao].toLowerCase() : 'sem decisão'}`),
+            `OK dado por ${f.conferidos[l.c].por} em ${quando(f.conferidos[l.c].em)}`, 'Situação: validado, tudo OK.', '',
+          ]),
+          'Documento gerado automaticamente pelo ACCOUNT. As horas vêm do AudiHoras e não são alteradas aqui.',
+        ]);
+        const docId = d.uuid(), para = db.config.emailValidacao || [], envio = { status: 'pendente', para, em };
+        await d.gravarDoc(docId, arquivo.toString('base64'));
+        const assunto = `Validação de recurso${varios ? 's' : ''} · ${projeto} · ${p2(m)}/${a}`;
+        if (!para.length) envio.erro = 'O endereço de destino ainda não foi configurado pelo administrador.';
+        else if (!d.enviarEmail) envio.erro = 'O envio de e-mail ainda não foi ligado no servidor.';
+        else {
+          try {
+            await d.enviarEmail({
+              para, assunto, anexo: { nome: `Validacao-${a}-${p2(m)}-${projeto}.pdf`, mime: 'application/pdf', dados: arquivo },
+              texto: `Olá,\n\nInformamos que ${varios ? 'os recursos abaixo foram devidamente validados' : 'o recurso foi devidamente validado'} e está tudo OK. Segue o documento referente à validação.\n\n`
+                + `Recurso${varios ? 's' : ''}: ${nomes.join(', ')}\nProjeto: ${projeto}\nCompetência: ${competencia}\nValidado por: ${s.u.nome}\n\nMensagem automática do ACCOUNT · Gestão de Contas e Projetos (Auditeste).`,
+            });
+            envio.status = 'enviado';
+          } catch (e) {
+            envio.status = 'falhou';
+            envio.erro = String(e.message).slice(0, 200);
+          }
+        }
+        const velhos = new Set(ids.map(c => f.validacoes[c]?.docId).filter(Boolean));
+        for (const c of ids) f.validacoes[c] = { por: s.u.nome, em, docId, envio };
+        for (const id of velhos) if (!Object.values(f.validacoes).some(v => v.docId === id)) await d.apagarDoc(id);
+        db.envios.push({ em, por: s.u.nome, para, assunto, recursos: nomes, status: envio.status, erro: envio.erro });
+        if (db.envios.length > 500) db.envios.splice(0, db.envios.length - 500);
+        auditar(s, 'validacao_' + envio.status, `${projeto} ${p2(m)}/${a}: ${nomes.join(', ')}${para.length ? ' → ' + para.join(', ') : ''}`);
+        salvar();
+        return f;
+      } finally {
+        trava.forEach(k => emEnvio.delete(k));
+      }
+    }
+    const lerEmails = v => {
+      const l = [...new Set(String(v || '').toLowerCase().split(/[,;\s]+/).filter(Boolean))];
+      if (l.length > 5) throw falha(400, 'No máximo 5 endereços.');
+      for (const e of l) if (!EMAIL.test(e)) throw falha(400, `E-mail inválido: ${e}`);
+      return l;
+    };
+    const config = () => ({ emailValidacao: db.config.emailValidacao || [], envioLigado: !!d.enviarEmail, remetente: d.enviarEmail?.remetente || '', envios: db.envios.slice(-200).reverse() });
     function decidir(s, b) {
       const a = Number(b.ano), m = Number(b.mes), pid = Number(b.projetoId);
       const ah = exigeProjeto(s, pid), f = fech(a, m, pid);
@@ -288,7 +456,7 @@
     // ctx = { s, sid, p (partes do caminho), b (corpo), q (parâmetros), saida (cookie ou arquivo) }
     const ID = '([0-9a-f-]{36})';
     const rotas = [
-      ['GET', '/api/me', ({ s }) => ({ limiteDoc: d.maxDoc || 8e6, usuario: s && { nome: s.u.nome, email: s.u.email, perfil: s.u.perfil, audihoras: vinculoDe(s.u) } }), null],
+      ['GET', '/api/me', ({ s }) => ({ limiteDoc: d.maxDoc || 8e6, usuario: s && { nome: s.u.nome, email: s.u.email, perfil: s.u.perfil, audihoras: vinculoDe(s.u), cofre: podeCofre(s.u) } }), null],
       ['POST', '/api/login', async ({ b, saida }) => { saida.cookie = await entrar(b.usuario, b.senha); return {}; }, null],
       ['POST', '/api/logout', ({ s, saida }) => {
         if (s) { s.fim = true; auditar(s, 'logout'); salvar(); }
@@ -301,12 +469,13 @@
         if (!s.ah && s.u.perfil === 'total') return { semHoras: 'As horas só aparecem para quem é gestor (Adm) no AudiHoras.' }; // não é erro: as outras telas seguem
         const ah = exigeAH(s), ano = Number(q.get('ano')), mes = Number(q.get('mes'));
         if (!(ano > 2000 && mes >= 1 && mes <= 12)) throw falha(400, 'Competência inválida');
-        const x = await dados(ah, ano, mes, q.has('atualizar'));
+        const x = await dados(s, ano, mes, q.has('atualizar'));
         const pick = obj => Object.fromEntries(Object.entries(obj).filter(([k]) => ah.meus.has(Number(k.split('|').pop()))));
         const prefixo = s.u.id + '|';
         return {
           ...x, fichas: Object.fromEntries([...ah.meus.keys()].map(pid => [pid, ficha(pid)])),
-          fechamentos: pick(db.fechamentos), registros: doTime(s).map(paraGerente),
+          fechamentos: pick(db.fechamentos), registros: doTime(s).map(r => paraGerente(s, r)),
+          validacao: { para: db.config.emailValidacao || [], ligado: !!d.enviarEmail },
           fichasContas: Object.fromEntries(Object.entries(db.contas).filter(([, c]) => !c.manual || c.criadaPor === s.u.id)),
           comentarios: Object.fromEntries(Object.entries(db.comentarios).filter(([k]) => k.startsWith(prefixo)).map(([k, v]) => [k.slice(prefixo.length), v])),
         };
@@ -320,15 +489,34 @@
         if (!mime) return { semFoto: true }; // não é erro: a tela fica com as iniciais
         saida.arquivo = { mime, nome: `foto-${id}`, dados: b64, cache: 'private, max-age=3600' };
       }, ['gerente']],
-      ['POST', '/api/registros', async ({ b, s }) => paraGerente(await novoRegistro(s, b)), ['gerente']],
+      // Os apontamentos de uma pessoa da equipe no mês, um a um, como na tela do AudiHoras (somente leitura).
+      ['GET', '/api/apontamentos', async ({ q, s }) => {
+        const ah = exigeAH(s), c = Number(q.get('colab')), ano = Number(q.get('ano')), mes = Number(q.get('mes'));
+        if (!ah.equipe?.has(c)) throw falha(404, 'Profissional fora da sua equipe');
+        if (!(ano > 2000 && mes >= 1 && mes <= 12)) throw falha(400, 'Competência inválida');
+        return { lancamentos: await d.apontamentosAH(ah, c, ano, mes) };
+      }, ['gerente']],
+      ['POST', '/api/registros', async ({ b, s }) => paraGerente(s, await novoRegistro(s, b)), ['gerente']],
       ['POST', `/api/registros/${ID}/status`, ({ b, s, p }) => {
         const r = mudarRegistro(s, p[0], b.status, b.obs);
-        return s.u.perfil === 'gerente' ? paraGerente(r) : r;
+        return s.u.perfil === 'gerente' ? paraGerente(s, r) : r;
       }, ['gerente', 'rh']],
+      ['POST', '/api/projetos', ({ b, s }) => criarProjeto(s, b), ['gerente']],
       ['POST', '/api/projetos/(\\d+)', ({ b, s, p }) => salvarFicha(s, Number(p[0]), b), ['gerente']],
+      ['DELETE', '/api/projetos/(\\d+)', ({ s, p }) => apagarProjeto(s, Number(p[0])), ['gerente']],
+      ['POST', '/api/projetos/(\\d+)/ligar', ({ b, s, p }) => ligarProjeto(s, Number(p[0]), b), ['gerente']],
+      ['POST', '/api/projetos/(\\d+)/membros', ({ b, s, p }) => membro(s, Number(p[0]), b), ['gerente']],
+      ['POST', '/api/projetos/(\\d+)/checklist', ({ b, s, p }) => checklist(s, Number(p[0]), b), ['gerente']],
       ['POST', '/api/fechamentos', ({ b, s }) => acaoFechamento(s, b), ['gerente']],
       ['POST', '/api/fechamentos/decisao', ({ b, s }) => decidir(s, b), ['gerente']],
       ['POST', '/api/fechamentos/conferido', ({ b, s }) => conferirPessoa(s, b), ['gerente']],
+      ['POST', '/api/fechamentos/validar', ({ b, s }) => validarRecursos(s, b), ['gerente']],
+      ['GET', `/api/validacao/${ID}`, async ({ s, p, saida }) => {
+        const ah = exigeAH(s);
+        const k = Object.keys(db.fechamentos).find(k => ah.meus?.has(Number(k.split('|').pop())) && Object.values(db.fechamentos[k].validacoes || {}).some(v => v.docId === p[0]));
+        if (!k) throw falha(404, 'Documento não encontrado');
+        saida.arquivo = { mime: 'application/pdf', nome: `Validação ${k.split('|')[0]} ${ah.meus.get(Number(k.split('|')[1]))}.pdf`, dados: await d.lerDoc(p[0]) };
+      }, ['gerente']],
       ['POST', '/api/contas', ({ b, s }) => salvarConta(s, b), ['gerente']],
       ['DELETE', '/api/contas', ({ q, s }) => apagarConta(s, q.get('nome')), ['gerente']],
       ['POST', '/api/comentarios', ({ b, s }) => {
@@ -352,13 +540,15 @@
         salvar();
         return r;
       }, ['rh']],
+      // O RH abre qualquer documento; o gerente, só os da própria equipe (e se o administrador não tirou a permissão).
       ['GET', `/api/arquivo/${ID}`, async ({ s, p, saida }) => {
         const r = db.registros.find(x => x.arquivo?.id === p[0]);
+        if (!R.tem(s.u, 'rh') && !(podeCofre(s.u) && s.ah?.equipe?.has(r?.colabId))) throw falha(403, 'Você não tem permissão para abrir este documento.');
         if (!r) throw falha(404, 'Documento não encontrado');
         saida.arquivo = { mime: r.arquivo.mime, nome: r.arquivo.nome, dados: await d.lerDoc(r.arquivo.id) };
         auditar(s, 'documento_aberto', `${R.TIPOS[r.tipo]} de ${r.colab}: ${r.arquivo.nome}`);
         salvar();
-      }, ['rh']],
+      }, ['rh', 'gerente']],
 
       // Administrador
       ['GET', '/api/usuarios', () => ({ usuarios: db.usuarios.map(publico) }), ['admin']],
@@ -377,7 +567,8 @@
         vinculoLivre({ ...u, audihoras });
         if (vinculoDe({ ...u, audihoras }) !== vinculoDe(u)) derrubar(u);
         Object.assign(u, { nome: texto(b.nome, 100) || u.nome, perfil: b.perfil, audihoras });
-        auditar(s, 'usuario_editado', `${u.email}: ${antes} → ${R.PERFIS[u.perfil]}, AudiHoras "${vinculoDe(u)}"`);
+        if (b.cofre !== undefined) u.cofre = b.cofre !== 'nao' && b.cofre !== false;
+        auditar(s, 'usuario_editado', `${u.email}: ${antes} → ${R.PERFIS[u.perfil]}, AudiHoras "${vinculoDe(u)}"${R.tem(u, 'gerente') && u.cofre === false ? ', sem o cofre' : ''}`);
         salvar();
         return publico(u);
       }, ['admin']],
@@ -393,6 +584,24 @@
         return publico(u);
       }, ['admin']],
       ['GET', '/api/auditoria', () => db.auditoria.slice(-1000).reverse(), ['admin']],
+      // Para onde vão as validações do fechamento. A conta que envia (SMTP) fica nas variáveis do servidor, não aqui.
+      ['GET', '/api/config', () => config(), ['admin']],
+      ['POST', '/api/config', ({ b, s }) => {
+        db.config.emailValidacao = lerEmails(b.emailValidacao);
+        auditar(s, 'config_email', db.config.emailValidacao.join(', ') || 'sem destino');
+        salvar();
+        return config();
+      }, ['admin']],
+      ['POST', '/api/config/teste', async ({ s }) => {
+        const para = db.config.emailValidacao || [];
+        if (!para.length) throw falha(400, 'Salve o endereço de destino antes de testar.');
+        if (!d.enviarEmail) throw falha(409, 'O envio de e-mail ainda não foi ligado no servidor.');
+        await d.enviarEmail({ para, assunto: 'Teste do ACCOUNT', texto: `Olá,\n\nEste é um teste do envio de validações do ACCOUNT, pedido por ${s.u.nome}.` })
+          .catch(e => { throw falha(502, e.message); });
+        auditar(s, 'config_email_teste', para.join(', '));
+        salvar();
+        return config();
+      }, ['admin']],
     ].map(([metodo, cam, fn, perfis]) => [metodo, new RegExp(`^${cam}$`), fn, perfis]);
 
     // Uma "requisição" sem HTTP: devolve { status, json, cookie?, arquivo? } para o ambiente responder.

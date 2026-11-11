@@ -312,6 +312,35 @@ details[open] .seta{transform:rotate(180deg);background:var(--verde-claro)}
 .lista-alertas li::before{content:"!";position:absolute;left:0;top:9px;width:18px;height:18px;border-radius:50%;background:var(--ambar-claro);color:var(--ambar-txt);font-weight:700;font-size:11px;display:grid;place-items:center}
 .lista-alertas li.ok::before{content:"✓";background:#e7f4da;color:var(--verde-txt)}
 
+/* ---------- equipe e checklist do projeto, histórico, calendário do ponto ---------- */
+.add-pessoa{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
+.add-pessoa input{flex:1 1 190px;min-width:0}
+.checklist{list-style:none;margin:8px 0;padding:0}
+.checklist li{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--linha2);font-size:13px}
+.checklist label{display:flex;align-items:center;gap:8px;flex:1 1 240px;min-width:0;cursor:pointer;font-weight:500;color:var(--tinta)}
+.checklist li.feito label span{text-decoration:line-through;color:var(--apagado)}
+.checklist small{color:var(--apagado);font-size:11.5px}
+.t-gestor{background:var(--verde-claro);color:var(--verde-txt)}
+.segmento{display:inline-flex;border:1px solid #d3d9d0;border-radius:10px;overflow:hidden;background:#fff}
+.segmento button{font:inherit;font-weight:600;font-size:13px;border:0;background:none;padding:8px 14px;min-height:36px;cursor:pointer;color:var(--tinta2)}
+.segmento button[aria-pressed=true]{background:var(--verde-claro);color:var(--verde-txt)}
+.nota-historico{font-size:12.5px;color:var(--tinta2);margin:12px 2px 0}
+.cal{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.cal-dow{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--apagado);font-weight:700;text-align:center;padding:2px 0}
+.dia{all:unset;box-sizing:border-box;cursor:pointer;display:flex;flex-direction:column;gap:1px;min-height:66px;min-width:0;padding:7px 8px;border:1px solid var(--linha);border-radius:12px;background:#fff}
+.dia b{font-size:11.5px;color:var(--tinta2)}
+.dia strong{font-size:14.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dia small{font-size:10.5px;color:var(--tinta2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dia.ok,.cal-leg i.ok{background:var(--verde-claro);border-color:#cfe6b8}
+.dia.falta,.cal-leg i.falta{background:var(--ambar-claro);border-color:#f2dcb4}
+.dia.ausente,.cal-leg i.ausente{background:var(--azul-claro);border-color:#cfe0ee}
+.dia.fds,.dia.feriado,.dia.futuro,.cal-leg i.fds{background:#f4f5f2;border-color:var(--linha)}
+.dia.fds strong,.dia.feriado strong,.dia.futuro strong{color:var(--apagado)}
+.dia.hoje{box-shadow:0 0 0 2px var(--verde)}
+.dia[aria-pressed=true]{outline:2px solid var(--g-prev);outline-offset:1px}
+.dia:focus-visible{outline:2px solid var(--g-prev);outline-offset:2px}
+.cal-leg i{border:1px solid}
+
 /* ---------- esqueleto de carregamento ---------- */
 .esq{border-radius:14px;background:linear-gradient(90deg,#eceee9 0%,#f6f7f4 45%,#eceee9 90%) 0 0/200% 100%;animation:brilho 1.3s linear infinite}
 
@@ -404,6 +433,10 @@ details[open] .seta{transform:rotate(180deg);background:var(--verde-claro)}
   .detalhe-pessoa{grid-template-columns:1fr}
   tr.linha-extra>td{padding:10px 4px}
   .linha-contato{grid-template-columns:1fr 1fr}
+  .cal{gap:3px}
+  .dia{min-height:50px;padding:4px 3px;border-radius:9px;align-items:center}
+  .dia strong{font-size:11.5px}
+  .dia small{display:none}
   table.resp tfoot td{background:none}
   .tab-wrap{overflow:visible}
   .hb{grid-template-columns:minmax(80px,120px) 1fr 62px;gap:8px}
