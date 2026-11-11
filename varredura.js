@@ -9,7 +9,7 @@ if (!process.env.PUPPETEER || !process.env.CHROME) { console.error('Defina PUPPE
 const puppeteer = require(process.env.PUPPETEER);
 const mock = require('./audihoras-mock.js');
 const smtp = require('./smtp-falso.js')(3008); // os e-mails das validações caem aqui
-const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: 3008, EMAIL_FROM: 'account@auditeste.com.br' };
+const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: 3008 };
 
 // Dados com a cara dos reais: códigos grandes, nomes longos de projeto e de pessoa.
 const FIC = require('./dados-ficticios.js');
@@ -316,13 +316,14 @@ async function gerente(browser, quem, usuario) {
   // Finalizar a validação do recurso: registra, gera o PDF e manda o e-mail, uma vez só
   const enviados = smtp.emails.length;
   await page.evaluate(() => document.querySelector('#conteudo td button.mini-btn[onclick*="validarDlg"]').click());
-  await dialogo(page, quem, 'finalizar validação');
+  await dialogo(page, quem, 'finalizar validação', { senhaEmail: 'Senha#1' }); // na segunda vez, a senha já está gravada
   const val = await page.evaluate(id => Object.values(fechDe(id).validacoes || {}).sort((a, b) => a.em.localeCompare(b.em)).map(v => [v.envio.status, v.docId]), ids[0]);
   if (val.at(-1)?.[0] !== 'enviado' || smtp.emails.length !== enviados + 1) problemas.push(`${quem}: a validação não foi enviada (${JSON.stringify(val)}, ${smtp.emails.length - enviados} e-mail)`);
   else {
     const r = await page.evaluate(d => fetch('/api/validacao/' + d).then(async r => [r.status, r.headers.get('content-type'), (await r.arrayBuffer()).byteLength]), val.at(-1)[1]);
     if (r[0] !== 200 || r[1] !== 'application/pdf' || r[2] < 800) problemas.push(`${quem}: o PDF da validação não abriu (${r})`);
     if (!smtp.emails.at(-1).includes('To: financeiro@auditeste.com.br')) problemas.push(`${quem}: e-mail da validação foi para o endereço errado`);
+    if (smtp.logins.at(-1) !== 'gestor@auditeste.com.br') problemas.push(`${quem}: a validação não saiu do e-mail de quem validou (${smtp.logins.at(-1)})`);
   }
   if (!(await page.$('#conteudo td .pill.fec-aprovado'))) problemas.push(`${quem}: a linha não mostra a validação como enviada`);
   const nDec = await page.$$eval('#conteudo select[aria-label="Decisão"]', l => l.length);
@@ -415,9 +416,12 @@ async function admin(browser, quem, usuario) {
   const antes = smtp.emails.length;
   await page.evaluate(() => { const f = document.querySelector('#conteudo form'); f.emailValidacao.value = 'financeiro@auditeste.com.br, rh@auditeste.com.br'; f.requestSubmit(); }); await sleep(900);
   if (await page.evaluate(() => CFG.emailValidacao.length) !== 2) problemas.push(`${quem}: o destino das validações não salvou`);
-  await page.evaluate(() => testarEmail(document.querySelector('#conteudo form .btn-sec'))); await sleep(1300);
-  if (smtp.emails.length !== antes + 1 || !smtp.emails.at(-1).includes('To: admin@auditeste.com.br')) problemas.push(`${quem}: o e-mail de teste não saiu só para quem pediu`);
-  if (!(await page.$('#conteudo form input[name=senha][type=password]'))) problemas.push(`${quem}: falta o formulário da conta que envia`);
+  await page.evaluate(() => testarEmail());
+  await dialogo(page, quem, 'e-mail de teste', { senhaEmail: 'Senha#1' });
+  if (smtp.emails.length !== antes + 1 || !smtp.emails.at(-1).includes('To: admin@auditeste.com.br') || smtp.logins.at(-1) !== 'admin@auditeste.com.br') problemas.push(`${quem}: o e-mail de teste não saiu do e-mail de quem pediu, só para ele`);
+  if (!(await page.$('#conteudo form input[name=host]'))) problemas.push(`${quem}: falta o formulário do servidor de envio`);
+  const apertado = await page.$$eval('#conteudo .btn, #conteudo .btn-sec', l => l.filter(b => b.scrollWidth > b.clientWidth + 1).map(b => b.textContent.trim()));
+  if (apertado.length) problemas.push(`${quem}: texto saindo do botão: ${apertado.join(', ')}`);
   if (!(await page.$('#conteudo table tbody tr:not(.vazia)'))) problemas.push(`${quem}: a lista de envios está vazia depois da validação do gerente`);
   await checar(page, quem, '#envios depois de salvar e testar');
   return page;

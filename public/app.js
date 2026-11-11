@@ -1306,18 +1306,40 @@ async function conferirPessoa(pid, c, ok) {
     render(false);
   } catch (e) { if (!e.silencioso) aviso(e.message, true); }
 }
+// Campos do remetente nos diálogos de envio: o e-mail sai da caixa da própria pessoa.
+function camposRemetente(gravada) {
+  return `<p>Sai do seu e-mail: <b>${esc(EU.email)}</b>.</p>` + (gravada
+    ? '<p class="dica inteiro">Usa a senha do seu e-mail gravada no ACCOUNT. <button type="button" class="link" onclick="esquecerSenhaEmail()">Esquecer a senha</button></p>'
+    : `<label class="inteiro">Senha do seu e-mail<input name="senhaEmail" type="password" required maxlength="200" autocomplete="current-password"></label>
+      <label class="chk inteiro"><input type="checkbox" name="lembrar" value="1" checked> Lembrar a senha neste ACCOUNT (fica cifrada; dá para esquecer depois)</label>`);
+}
+const corpoRemetente = fd => ({ senhaEmail: fd.get('senhaEmail') || undefined, lembrar: !!fd.get('lembrar') });
+async function esquecerSenhaEmail() {
+  try {
+    await api('/api/minha-senha-email', { method: 'POST' });
+    EU.senhaEmail = false;
+    if (D?.validacao) D.validacao.senhaGravada = false;
+    if (CFG) CFG.suaSenha = false;
+    $('#dialogo').close();
+    render(false);
+    aviso('Senha do e-mail esquecida. Ela será pedida no próximo envio.');
+  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
+}
 function validarDlg(pid, ids, reenviar = false) {
   const para = D.validacao?.para || [], chave = R.chave(comp.ano, comp.mes, pid);
   dialogo(reenviar ? 'Enviar a validação de novo' : 'Finalizar a validação', `<p><b>${esc(ids.map(nomeColab).join(', '))}</b> · ${esc(proj(pid).nome)} · ${nomeMes()}</p>
     <p>O ACCOUNT registra a validação, gera um PDF com as horas conferidas e envia por e-mail${para.length ? ` para <b>${esc(para.join(', '))}</b>` : ''}, com a mensagem de que o recurso foi validado e está tudo OK.</p>
     ${!para.length ? '<p class="neg">O administrador ainda não informou o endereço de destino. A validação fica registrada, com o PDF para baixar, e o e-mail sai depois, pelo botão "Enviar agora".</p>'
-      : !D.validacao.ligado ? '<p class="neg">O envio de e-mail ainda não foi ligado no servidor. A validação fica registrada, com o PDF para baixar, e o e-mail sai depois, pelo botão "Enviar agora".</p>' : ''}
+      : !D.validacao.ligado ? '<p class="neg">O administrador ainda não configurou o servidor de envio. A validação fica registrada, com o PDF para baixar, e o e-mail sai depois, pelo botão "Enviar agora".</p>'
+        : camposRemetente(D.validacao.senhaGravada)}
     ${reenviar ? '<p class="neg">Esta validação já foi enviada. Confirmar manda outro e-mail, com um documento novo.</p>' : ''}`, {
     ok: reenviar ? 'Enviar de novo' : 'Finalizar e enviar',
-    enviar: async () => {
-      const f = D.fechamentos[chave] = await api('/api/fechamentos/validar', { method: 'POST', body: { ano: comp.ano, mes: comp.mes, projetoId: pid, colabIds: ids, reenviar } });
-      render(false);
+    enviar: async fd => {
+      const f = D.fechamentos[chave] = await api('/api/fechamentos/validar', { method: 'POST', body: { ano: comp.ano, mes: comp.mes, projetoId: pid, colabIds: ids, reenviar, ...corpoRemetente(fd) } });
       const envio = f.validacoes[ids[0]].envio;
+      if (envio.status === 'enviado' && fd.get('lembrar')) D.validacao.senhaGravada = EU.senhaEmail = true;
+      if (envio.status === 'falhou' && /não aceitou/.test(envio.erro)) D.validacao.senhaGravada = EU.senhaEmail = false; // a gravada recusada foi esquecida
+      render(false);
       aviso(envio.status === 'enviado' ? 'Validação registrada e e-mail enviado.' : `Validação registrada. O e-mail não saiu: ${envio.erro}`, envio.status !== 'enviado');
     },
   });
@@ -1606,7 +1628,7 @@ const ACOES = {
   alocacao_removida: 'Alocação removida', fechamento_conferir: 'Conferência iniciada', fechamento_aprovar: 'Fechamento aprovado',
   fechamento_reabrir: 'Fechamento reaberto', fechamento_decisao: 'Decisão de ausência', fechamento_pessoa: 'OK no profissional',
   validacao_enviado: 'Validação enviada por e-mail', validacao_pendente: 'Validação aguardando envio', validacao_falhou: 'Envio da validação falhou',
-  config_email: 'Destino das validações', config_email_teste: 'E-mail de teste', config_conta: 'Conta que envia os e-mails', conta_criada: 'Conta criada', conta_atualizada: 'Ficha de conta', conta_excluida: 'Conta excluída',
+  config_email: 'Destino das validações', config_email_teste: 'E-mail de teste', config_servidor: 'Servidor de envio', senha_email_esquecida: 'Senha do e-mail esquecida', conta_criada: 'Conta criada', conta_atualizada: 'Ficha de conta', conta_excluida: 'Conta excluída',
   projeto_criado: 'Projeto criado', projeto_excluido: 'Projeto excluído', projeto_ligado: 'Projeto ligado ao AudiHoras', projeto_equipe: 'Equipe do projeto', projeto_checklist: 'Checklist do projeto',
 };
 function auditoria() {
@@ -1619,37 +1641,33 @@ function auditoria() {
 
 // ---------- E-mails das validações ----------
 function envios() {
-  const sit = { enviado: ['Enviado', 'fec-aprovado'], pendente: ['Aguardando envio', 'fec-conferencia'], falhou: ['Falhou', 'fec-reaberto'] }, ct = CFG.conta || {};
+  const sit = { enviado: ['Enviado', 'fec-aprovado'], pendente: ['Aguardando envio', 'fec-conferencia'], falhou: ['Falhou', 'fec-reaberto'] }, sv = CFG.servidor || {};
   const linhas = CFG.envios.map(e => [dataHora(e.em), esc(e.por), e.recursos.map(esc).join(', '), esc(e.assunto), e.para.map(esc).join(', ') || '·', `${pill(...sit[e.status])}${e.erro ? `<small>${esc(e.erro)}</small>` : ''}`]);
-  const situacao = CFG.envioLigado ? `<div class="aviso"><b>● Envio ligado</b><br>Os e-mails saem de ${esc(CFG.remetente)}${CFG.conta ? '' : ' (conta das variáveis do servidor)'}.</div>`
-    : CFG.conta ? `<div class="aviso ambar"><b>● Falta a senha</b><br>A conta ${esc(ct.usuario)} está preenchida, mas sem senha. Digite a senha da caixa e salve; depois use o e-mail de teste.</div>`
-      : '<div class="aviso ambar"><b>● Envio ainda não ligado</b><br>Preencha a conta que envia. Até lá, cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando.</div>';
-  return cab('Administração', 'E-mails das validações', 'Para onde vai o documento quando um gerente finaliza a validação de um recurso no fechamento, e de qual conta ele sai.')
+  const situacao = CFG.envioLigado ? `<div class="aviso"><b>● Envio ligado</b><br>Cada validação sai do e-mail de quem validou, por ${esc(sv.host)}:${sv.porta}${sv.daTela ? '' : ' (servidor das variáveis do servidor)'}. Na primeira vez, o ACCOUNT pede a senha do e-mail da pessoa.</div>`
+    : '<div class="aviso ambar"><b>● Envio ainda não ligado</b><br>Informe o servidor de envio. Até lá, cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando.</div>';
+  return cab('Administração', 'E-mails das validações', 'Para onde vai o documento quando um gerente finaliza a validação de um recurso no fechamento. O e-mail sai da caixa de quem validou.')
     + `<section class="card"><h2>Endereço de destino</h2><p class="sub">Quem recebe o e-mail com o PDF da validação. Até 5 endereços, separados por vírgula.</p><br>
         <form class="form" onsubmit="salvarConfig(event, this)">
           <label class="largo">E-mail de destino<input name="emailValidacao" maxlength="400" value="${esc(CFG.emailValidacao.join(', '))}" placeholder="financeiro@auditeste.com.br"></label>
           <button class="btn">Salvar destino</button>
         </form></section>
-      <section class="card"><h2>Conta que envia</h2><p class="sub">A caixa de e-mail de onde as validações saem. A senha fica cifrada no servidor e nunca volta para esta tela.</p><br>
-        <form class="form" onsubmit="salvarContaEnvio(event, this)">
-          <label>Servidor de envio (SMTP)<input name="host" maxlength="100" autocapitalize="none" spellcheck="false" value="${esc(ct.host)}" placeholder="email-ssl.com.br"></label>
-          <label>Porta<select name="porta">${opcoes({ 465: '465 (conexão segura direta)', 587: '587 (STARTTLS)' }, ct.porta || 465)}</select></label>
-          <label>Usuário da caixa<input name="usuario" maxlength="120" autocomplete="off" autocapitalize="none" spellcheck="false" value="${esc(ct.usuario)}" placeholder="nome@auditeste.com.br"></label>
-          <label>Senha da caixa<input name="senha" type="password" maxlength="200" autocomplete="new-password" placeholder="${ct.temSenha ? 'Gravada. Vazio mantém a atual' : 'Digite a senha'}"></label>
-          <label>Remetente<input name="de" type="email" maxlength="120" value="${esc(ct.de)}" placeholder="Vazio usa o usuário"></label>
-          <button class="btn">Salvar conta</button>
-          <button type="button" class="btn-sec" onclick="testarEmail(this)">Enviar e-mail de teste para mim</button>
-          <p class="dica inteiro">O teste vai só para o seu endereço (${esc(EU.email)}), não para o destino das validações. Para desligar o envio, apague o servidor e salve.</p>
+      <section class="card"><h2>Servidor de envio</h2><p class="sub">Por onde as caixas da Auditeste enviam. Cada gerente envia do próprio e-mail, com a senha dele, digitada na hora de finalizar (pode ficar gravada, cifrada).</p><br>
+        <form class="form" onsubmit="salvarServidor(event, this)">
+          <label>Servidor (SMTP)<input name="host" maxlength="100" autocapitalize="none" spellcheck="false" value="${esc(sv.daTela ? sv.host : '')}" placeholder="email-ssl.com.br"></label>
+          <label>Porta<select name="porta">${opcoes({ 465: '465 (conexão segura direta)', 587: '587 (STARTTLS)' }, sv.porta || 465)}</select></label>
+          <button class="btn">Salvar servidor</button>
+          <button type="button" class="btn-sec" onclick="testarEmail()">Testar o envio</button>
+          <p class="dica inteiro">O e-mail da Auditeste é da Locaweb: servidor email-ssl.com.br, porta 465. O teste sai do seu e-mail (${esc(EU.email)}) e vai só para você.</p>
         </form>${situacao}</section>
       <section class="card"><h2>Últimos envios</h2><p class="sub">Cada validação finalizada no fechamento (as 200 mais recentes)</p><br>
         ${tabela(['Quando', 'Quem validou', 'Recursos', 'Assunto', 'Para', 'Situação'], linhas, { vazio: 'Nenhuma validação finalizada ainda.' })}</section>`;
 }
-async function salvarContaEnvio(ev, f) {
+async function salvarServidor(ev, f) {
   ev.preventDefault();
   try {
-    CFG = await api('/api/config/conta', { method: 'POST', body: Object.fromEntries(new FormData(f)) });
+    CFG = await api('/api/config/servidor', { method: 'POST', body: Object.fromEntries(new FormData(f)) });
     render(false);
-    aviso(CFG.conta ? (CFG.conta.temSenha ? 'Conta de envio salva.' : 'Conta salva. Falta a senha.') : 'Envio desligado.', !!CFG.conta && !CFG.conta.temSenha);
+    aviso(CFG.servidor?.daTela ? 'Servidor de envio salvo.' : 'Servidor apagado da tela.');
   } catch (e) { if (!e.silencioso) aviso(e.message, true); }
 }
 async function salvarConfig(ev, f) {
@@ -1660,13 +1678,17 @@ async function salvarConfig(ev, f) {
     aviso('Endereço de destino salvo.');
   } catch (e) { if (!e.silencioso) aviso(e.message, true); }
 }
-async function testarEmail(b) {
-  b.disabled = true;
-  try {
-    CFG = await api('/api/config/teste', { method: 'POST' });
-    aviso(`E-mail de teste enviado para ${CFG.testePara}.`);
-  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
-  b.disabled = false;
+function testarEmail() {
+  if (!CFG.envioLigado) return aviso('Salve o servidor de envio antes de testar.', true);
+  dialogo('E-mail de teste', `<p>Manda um e-mail de teste do seu e-mail para ele mesmo, para conferir se o envio funciona.</p>${camposRemetente(CFG.suaSenha)}`, {
+    ok: 'Enviar teste',
+    enviar: async fd => {
+      CFG = await api('/api/config/teste', { method: 'POST', body: corpoRemetente(fd) });
+      if (fd.get('lembrar')) CFG.suaSenha = EU.senhaEmail = true;
+      render(false);
+      aviso(`E-mail de teste enviado para ${CFG.testePara}. Confira a caixa de entrada.`);
+    },
+  });
 }
 
 // ---------- Financeiro ----------

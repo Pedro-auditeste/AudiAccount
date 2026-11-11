@@ -59,7 +59,8 @@ function mensagem(de, { para, assunto, texto, anexo }) {
     partes.push(`--${limite}`, `Content-Type: ${anexo.mime}; name="${nome}"`, 'Content-Transfer-Encoding: base64',
       `Content-Disposition: attachment; filename="${nome}"`, '', em76(anexo.dados.toString('base64')));
   }
-  return [`From: ${/</.test(de) ? limpo(de) : `ACCOUNT <${limpo(de)}>`}`, `To: ${para.map(limpo).join(', ')}`, `Subject: =?UTF-8?B?${b64(limpo(assunto))}?=`,
+  const nome = (/</.test(de) ? limpo(de.split('<')[0]) : 'ACCOUNT').replace(/"/g, ''); // nome com acento vai codificado
+  return [`From: ${/^[\x20-\x7e]*$/.test(nome) ? `"${nome}"` : `=?UTF-8?B?${b64(nome)}?=`} <${endereco(de)}>`, `To: ${para.map(limpo).join(', ')}`, `Subject: =?UTF-8?B?${b64(limpo(assunto))}?=`,
     `Date: ${new Date().toUTCString().replace('GMT', '+0000')}`, `Message-ID: <${crypto.randomUUID()}@account>`, 'MIME-Version: 1.0',
     `Content-Type: multipart/mixed; boundary="${limite}"`, '', ...partes, `--${limite}--`].join('\r\n');
 }
@@ -107,10 +108,11 @@ async function smtp(cfg, msg) {
       await cmd('EHLO account', 250);
     }
     if (cfg.usuario) {
-      if (!seguro) throw new Error('O servidor de e-mail não oferece conexão segura; a senha não foi enviada.');
+      // A senha só vai por conexão cifrada. Exceção: 127.0.0.1, que não sai do computador (é o servidor de teste).
+      if (!seguro && cfg.host !== '127.0.0.1') throw new Error('O servidor de e-mail não oferece conexão segura; a senha não foi enviada.');
       await cmd('AUTH LOGIN', 334);
       await cmd(b64(cfg.usuario), 334);
-      await cmd(b64(cfg.senha), 235).catch(e => { throw new Error('O servidor de e-mail não aceitou o usuário ou a senha da caixa. ' + e.message); });
+      await cmd(b64(cfg.senha), 235).catch(e => { throw Object.assign(new Error('O servidor de e-mail não aceitou o seu e-mail ou a senha. ' + e.message), { auth: true }); });
     }
     await cmd(`MAIL FROM:<${endereco(cfg.de)}>`, 250);
     for (const p of para) await cmd(`RCPT TO:<${p}>`, 250, 251);
@@ -122,11 +124,7 @@ async function smtp(cfg, msg) {
   }
 }
 
-// Envio por uma conta: { host, porta, usuario, senha, de }.
-exports.conta = cfg => Object.assign(msg => smtp(cfg, msg), { remetente: endereco(cfg.de) });
-// Conta das variáveis do servidor: só existe com SMTP_HOST (SMTP_PORT, SMTP_USER, SMTP_PASS e EMAIL_FROM completam).
-exports.transporte = env => {
-  if (!env.SMTP_HOST) return null;
-  const cfg = { host: env.SMTP_HOST, porta: Number(env.SMTP_PORT) || 587, usuario: env.SMTP_USER || '', senha: env.SMTP_PASS || '', de: env.EMAIL_FROM || env.SMTP_USER || 'account@localhost' };
-  return exports.conta(cfg);
-};
+// Envio por uma conta: { host, porta, usuario, senha, de }. Cada pessoa envia do próprio e-mail.
+exports.conta = cfg => msg => smtp(cfg, msg);
+// Servidor das variáveis (SMTP_HOST e SMTP_PORT), para quando o administrador não gravou um na tela E-mails.
+exports.servidor = env => (env.SMTP_HOST ? { host: env.SMTP_HOST, porta: Number(env.SMTP_PORT) || 587 } : null);

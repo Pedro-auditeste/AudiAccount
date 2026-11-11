@@ -45,7 +45,7 @@ const nucleo = Nucleo.criar({
   apontamentosAH: AH.apontamentos,
   cifrar: txt => cofre.cifrar(Buffer.from(txt)).toString('base64'),
   decifrar: b64 => cofre.decifrar(Buffer.from(b64, 'base64')).toString(),
-  enviarEmail: Envio.transporte(process.env),
+  servidorEmail: Envio.servidor(process.env),
 });
 
 const primeiro = nucleo.garantirAdmin(process.env.ADMIN_EMAIL);

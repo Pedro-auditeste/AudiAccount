@@ -9,7 +9,7 @@
 
   // d = dependências de cada ambiente: { db, salvar, uuid, sessoes: { ler, gravar, apagar }, gravarDoc, lerDoc, apagarDoc,
   //   conectarAH, dadosAH, fotoAH, apontamentosAH, maxDoc, cifrar e decifrar (texto, com a chave do cofre),
-  //   enviarEmail (só onde há SMTP nas variáveis do servidor) }.
+  //   servidorEmail (o das variáveis SMTP_HOST e SMTP_PORT, se houver) }.
   // Sessões e documentos podem ser assíncronos (Redis na Vercel).
   N.criar = d => {
     const { db } = d;
@@ -19,8 +19,10 @@
     for (const u of db.usuarios) { if (u.status === 'convite') u.status = 'ativo'; delete u.senha; delete u.link; }
     delete db.pedidos;
     db.contas ||= {}; // ficha de cada conta (cliente): sobre o que é, tecnologias e contatos
-    db.config ||= {}; // emailValidacao: para onde vão as validações do fechamento; smtp: a conta que envia
+    db.config ||= {}; // emailValidacao: para onde vão as validações do fechamento; smtp: o servidor de envio
     db.envios ||= []; // histórico dos e-mails de validação
+    // Até 11/11/2026 havia uma conta só que enviava; agora cada pessoa envia do próprio e-mail e fica só o servidor.
+    if (db.config.smtp) db.config.smtp = { host: db.config.smtp.host, porta: db.config.smtp.porta };
 
     function auditar(s, acao, detalhe = '') {
       db.auditoria.push({ em: agora(), por: s ? `${s.u.nome} <${s.u.email}>` : 'sistema', acao, detalhe: String(detalhe).slice(0, 300) });
@@ -361,7 +363,8 @@
       return f;
     }
     // Validação do recurso: depois do OK, o gerente finaliza. Fica o registro, sai um PDF com o que foi validado e o
-    // e-mail vai para o endereço que o administrador configurou. Recurso já enviado só vai de novo se o gerente pedir.
+    // e-mail sai do e-mail de quem validou para o endereço que o administrador configurou. Recurso já enviado só vai
+    // de novo se o gerente pedir.
     const emEnvio = new Set(); // envios em andamento neste servidor (na Vercel, a trava do banco já deixa um por vez)
     const p2 = n => String(n).padStart(2, '0');
     const horas = min => (min / 60).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' h';
@@ -376,6 +379,8 @@
         if (!f.conferidos?.[c]) throw falha(409, `Dê o OK em ${ah.equipe?.get(c) || 'cada recurso'} antes de finalizar.`);
         if (f.validacoes[c]?.envio.status === 'enviado' && !b.reenviar) throw falha(409, `A validação de ${ah.equipe.get(c)} já foi enviada em ${quando(f.validacoes[c].envio.em)}.`, { jaEnviado: true });
       }
+      // Sem a senha do e-mail de quem valida, pede antes de registrar qualquer coisa.
+      const para = db.config.emailValidacao || [], enviar = para.length ? await remetente(s, b) : null;
       const trava = ids.map(c => `${R.chave(a, m, pid)}|${c}`);
       if (trava.some(k => emEnvio.has(k))) throw falha(409, 'Esse envio já está em andamento.');
       trava.forEach(k => emEnvio.add(k));
@@ -403,19 +408,19 @@
           ]),
           'Documento gerado automaticamente pelo ACCOUNT. As horas vêm do AudiHoras e não são alteradas aqui.',
         ]);
-        const docId = d.uuid(), para = db.config.emailValidacao || [], envio = { status: 'pendente', para, em };
+        const docId = d.uuid(), envio = { status: 'pendente', para, em };
         await d.gravarDoc(docId, arquivo.toString('base64'));
         const assunto = `Validação de recurso${varios ? 's' : ''} · ${projeto} · ${p2(m)}/${a}`;
         if (!para.length) envio.erro = 'O endereço de destino ainda não foi configurado pelo administrador.';
-        else if (!temRemetente()) envio.erro = 'A conta que envia os e-mails ainda não foi configurada pelo administrador.';
+        else if (!enviar) envio.erro = 'O servidor de envio ainda não foi configurado pelo administrador.';
         else {
           try {
-            await (await remetente())({
+            await enviar({
               para, assunto, anexo: { nome: `Validacao-${a}-${p2(m)}-${projeto}.pdf`, mime: 'application/pdf', dados: arquivo },
               texto: `Olá,\n\nInformamos que ${varios ? 'os recursos abaixo foram devidamente validados' : 'o recurso foi devidamente validado'} e está tudo OK. Segue o documento referente à validação.\n\n`
                 + `Recurso${varios ? 's' : ''}: ${nomes.join(', ')}\nProjeto: ${projeto}\nCompetência: ${competencia}\nValidado por: ${s.u.nome}\n\nMensagem automática do ACCOUNT · Gestão de Contas e Projetos (Auditeste).`,
             });
-            envio.status = 'enviado';
+            Object.assign(envio, { status: 'enviado', de: s.u.email });
           } catch (e) {
             envio.status = 'falhou';
             envio.erro = String(e.message).slice(0, 200);
@@ -439,40 +444,48 @@
       for (const e of l) if (!EMAIL.test(e)) throw falha(400, `E-mail inválido: ${e}`);
       return l;
     };
-    // Conta que envia: a que o administrador gravou na tela E-mails (a senha fica cifrada com a chave do cofre e
-    // nunca volta para a tela) ou, sem ela, a das variáveis do servidor (SMTP_*).
-    const temRemetente = () => !!(db.config.smtp?.senha || (!db.config.smtp && d.enviarEmail));
-    async function remetente() {
-      const c = db.config.smtp;
-      if (c) return c.senha ? Envio.conta({ ...c, senha: await d.decifrar(c.senha) }) : null;
-      return d.enviarEmail || null;
+    // Cada pessoa envia do próprio e-mail (o do cadastro no ACCOUNT), pelo servidor que o administrador configurou.
+    // A senha vem digitada na hora ou é a que a pessoa pediu para lembrar, cifrada com a chave do cofre. Só fica
+    // gravada a senha que funcionou; a gravada que o servidor recusar é esquecida.
+    const servidor = () => (db.config.smtp?.host ? db.config.smtp : d.servidorEmail || null);
+    async function remetente(s, b = {}) {
+      const srv = servidor();
+      if (!srv) return null;
+      const digitada = b.senhaEmail ? String(b.senhaEmail).slice(0, 200) : '';
+      const senha = digitada || (s.u.senhaEmail ? await d.decifrar(s.u.senhaEmail) : '');
+      if (!senha) throw falha(400, 'Digite a senha do seu e-mail para enviar.', { pedeSenha: true });
+      const conta = Envio.conta({ host: srv.host, porta: srv.porta, usuario: s.u.email, senha, de: `${s.u.nome} <${s.u.email}>` });
+      return async msg => {
+        try {
+          await conta(msg);
+        } catch (e) {
+          if (e.auth && !digitada) { delete s.u.senhaEmail; salvar(); }
+          throw e;
+        }
+        if (digitada && b.lembrar) s.u.senhaEmail = await d.cifrar(digitada);
+      };
     }
-    const config = () => {
-      const c = db.config.smtp;
+    const config = s => {
+      const srv = servidor();
       return {
-        emailValidacao: db.config.emailValidacao || [], envioLigado: temRemetente(), remetente: c ? c.de : d.enviarEmail?.remetente || '',
-        conta: c ? { host: c.host, porta: c.porta, usuario: c.usuario, de: c.de, temSenha: !!c.senha } : null, envios: db.envios.slice(-200).reverse(),
+        emailValidacao: db.config.emailValidacao || [], envioLigado: !!srv, servidor: srv && { host: srv.host, porta: srv.porta, daTela: !!db.config.smtp?.host },
+        suaSenha: !!s.u.senhaEmail, envios: db.envios.slice(-200).reverse(),
       };
     };
-    async function salvarContaEnvio(s, b) {
-      const host = texto(b.host, 100).toLowerCase(), atual = db.config.smtp;
+    function salvarServidor(s, b) {
+      const host = texto(b.host, 100).toLowerCase();
       if (!host) {
         delete db.config.smtp;
-        auditar(s, 'config_conta', 'removida');
+        auditar(s, 'config_servidor', 'removido');
       } else {
-        const porta = Number(b.porta), usuario = texto(b.usuario, 120), de = texto(b.de, 120).toLowerCase() || usuario.toLowerCase();
+        const porta = Number(b.porta);
         if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(host)) throw falha(400, 'Servidor de envio inválido (ex.: email-ssl.com.br).');
         if (!(Number.isInteger(porta) && porta > 0 && porta < 65536)) throw falha(400, 'Porta inválida: use 465 ou 587.');
-        if (!usuario) throw falha(400, 'Informe o usuário da conta de envio.');
-        if (!EMAIL.test(de)) throw falha(400, 'Remetente inválido: use um endereço de e-mail.');
-        // Senha nova vai cifrada. A gravada só continua valendo para o mesmo servidor e o mesmo usuário:
-        // trocar um dos dois sem redigitar a senha não manda a senha antiga para outro lugar.
-        const senha = b.senha ? await d.cifrar(String(b.senha).slice(0, 200)) : atual?.host === host && atual?.usuario === usuario ? atual.senha : undefined;
-        db.config.smtp = { host, porta, usuario, de, senha };
-        auditar(s, 'config_conta', `${usuario} em ${host}:${porta}${senha ? '' : ', sem senha ainda'}`);
+        db.config.smtp = { host, porta };
+        auditar(s, 'config_servidor', `${host}:${porta}`);
       }
       salvar();
-      return config();
+      return config(s);
     }
     function decidir(s, b) {
       const a = Number(b.ano), m = Number(b.mes), pid = Number(b.projetoId);
@@ -492,7 +505,7 @@
     // ctx = { s, sid, p (partes do caminho), b (corpo), q (parâmetros), saida (cookie ou arquivo) }
     const ID = '([0-9a-f-]{36})';
     const rotas = [
-      ['GET', '/api/me', ({ s }) => ({ limiteDoc: d.maxDoc || 8e6, usuario: s && { nome: s.u.nome, email: s.u.email, perfil: s.u.perfil, audihoras: vinculoDe(s.u), cofre: podeCofre(s.u) } }), null],
+      ['GET', '/api/me', ({ s }) => ({ limiteDoc: d.maxDoc || 8e6, usuario: s && { nome: s.u.nome, email: s.u.email, perfil: s.u.perfil, audihoras: vinculoDe(s.u), cofre: podeCofre(s.u), senhaEmail: !!s.u.senhaEmail } }), null],
       ['POST', '/api/login', async ({ b, saida }) => { saida.cookie = await entrar(b.usuario, b.senha); return {}; }, null],
       ['POST', '/api/logout', ({ s, saida }) => {
         if (s) { s.fim = true; auditar(s, 'logout'); salvar(); }
@@ -511,7 +524,7 @@
         return {
           ...x, fichas: Object.fromEntries([...ah.meus.keys()].map(pid => [pid, ficha(pid)])),
           fechamentos: pick(db.fechamentos), registros: doTime(s).map(r => paraGerente(s, r)),
-          validacao: { para: db.config.emailValidacao || [], ligado: temRemetente() },
+          validacao: { para: db.config.emailValidacao || [], ligado: !!servidor(), senhaGravada: !!s.u.senhaEmail },
           fichasContas: Object.fromEntries(Object.entries(db.contas).filter(([, c]) => !c.manual || c.criadaPor === s.u.id)),
           comentarios: Object.fromEntries(Object.entries(db.comentarios).filter(([k]) => k.startsWith(prefixo)).map(([k, v]) => [k.slice(prefixo.length), v])),
         };
@@ -614,30 +627,36 @@
         if (!['ativo', 'bloqueado'].includes(b.status)) throw falha(400, 'Situação inválida');
         if (u.id === s.u.id) throw falha(409, 'Você não pode bloquear a própria conta.');
         u.status = b.status;
-        if (u.status === 'bloqueado') derrubar(u);
+        if (u.status === 'bloqueado') { derrubar(u); delete u.senhaEmail; }
         auditar(s, b.status === 'ativo' ? 'usuario_reativado' : 'usuario_bloqueado', u.email);
         salvar();
         return publico(u);
       }, ['admin']],
+      ['POST', '/api/minha-senha-email', ({ s }) => {
+        delete s.u.senhaEmail;
+        auditar(s, 'senha_email_esquecida');
+        salvar();
+        return {};
+      }, ['gerente', 'admin']],
       ['GET', '/api/auditoria', () => db.auditoria.slice(-1000).reverse(), ['admin']],
       // Para onde vão as validações do fechamento. A conta que envia (SMTP) fica nas variáveis do servidor, não aqui.
-      ['GET', '/api/config', () => config(), ['admin']],
+      ['GET', '/api/config', ({ s }) => config(s), ['admin']],
       ['POST', '/api/config', ({ b, s }) => {
         db.config.emailValidacao = lerEmails(b.emailValidacao);
         auditar(s, 'config_email', db.config.emailValidacao.join(', ') || 'sem destino');
         salvar();
-        return config();
+        return config(s);
       }, ['admin']],
-      ['POST', '/api/config/conta', ({ b, s }) => salvarContaEnvio(s, b), ['admin']],
+      ['POST', '/api/config/servidor', ({ b, s }) => salvarServidor(s, b), ['admin']],
       // O teste vai para quem pediu, não para o destino das validações: ninguém recebe e-mail de teste sem esperar.
-      ['POST', '/api/config/teste', async ({ s }) => {
-        const enviar = await remetente();
-        if (!enviar) throw falha(409, 'Configure a conta que envia (com a senha) antes de testar.');
-        await enviar({ para: [s.u.email], assunto: 'Teste do ACCOUNT', texto: `Olá,\n\nEste é um teste do envio de validações do ACCOUNT, pedido por ${s.u.nome}. Se chegou, a conta de envio está funcionando.` })
+      ['POST', '/api/config/teste', async ({ b, s }) => {
+        const enviar = await remetente(s, b);
+        if (!enviar) throw falha(409, 'Configure o servidor de envio antes de testar.');
+        await enviar({ para: [s.u.email], assunto: 'Teste do ACCOUNT', texto: `Olá,\n\nEste é um teste do envio de validações do ACCOUNT, pedido por ${s.u.nome}. Se chegou, o seu e-mail já consegue enviar as validações.` })
           .catch(e => { throw falha(502, e.message); });
         auditar(s, 'config_email_teste', s.u.email);
         salvar();
-        return { ...config(), testePara: s.u.email };
+        return { ...config(s), testePara: s.u.email };
       }, ['admin']],
     ].map(([metodo, cam, fn, perfis]) => [metodo, new RegExp(`^${cam}$`), fn, perfis]);
 

@@ -10,7 +10,7 @@ const Nucleo = require('./nucleo.js');
 const mock = require('./audihoras-mock.js');
 
 const PORTA_LOCAL = 3999, PORTA_AH = 3998, PORTA_REDIS = 3997, PORTA_VERCEL = 3996, PORTA_SMTP = 3995;
-const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: PORTA_SMTP, EMAIL_FROM: 'account@auditeste.com.br' };
+const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: PORTA_SMTP };
 const AH_URL = `http://127.0.0.1:${PORTA_AH}/`, ADMIN_EMAIL = 'admin@auditeste.com.br';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'account-'));
 const servidor = (porta, fn) => http.createServer(fn).listen(porta, '127.0.0.1');
@@ -23,7 +23,8 @@ const ahFalso = servidor(PORTA_AH, async (req, res) => {
 });
 
 // Servidor de e-mail de mentira (smtp-falso.js): guarda cada mensagem que chega para o teste olhar.
-const smtpFalso = require('./smtp-falso.js')(PORTA_SMTP), { emails } = smtpFalso;
+const smtpFalso = require('./smtp-falso.js')(PORTA_SMTP), { emails, logins } = smtpFalso;
+const Envio = require('./envio.js');
 
 // Redis de mentira com a API REST da Upstash: só os comandos que o api/index.js usa.
 const redis = new Map(), expira = new Map();
@@ -186,31 +187,38 @@ async function ponta(base, docCru, bancoCru) {
   assert.equal((await ger('GET', '/api/config')).st, 403, 'só o administrador configura o destino');
   assert.equal((await adm('POST', '/api/config', { emailValidacao: 'financeiro@auditeste.com.br; torto' })).st, 400);
   const { j: cfg } = await adm('POST', '/api/config', { emailValidacao: 'Financeiro@auditeste.com.br; rh@auditeste.com.br' });
-  assert.deepEqual([cfg.emailValidacao, cfg.envioLigado, cfg.remetente], [['financeiro@auditeste.com.br', 'rh@auditeste.com.br'], true, 'account@auditeste.com.br']);
-  assert.equal((await adm('POST', '/api/config/teste')).st, 200);
-  assert.ok(emails.at(-1).includes('To: admin@auditeste.com.br') && emails.length === antes + 1, 'o e-mail de teste vai só para quem pediu');
-  // Conta que envia gravada pelo administrador: a senha fica cifrada, não volta para a tela e não segue para outro servidor.
-  const conta = { host: '127.0.0.1', porta: PORTA_SMTP, usuario: 'pedro@auditeste.com.br', senha: 'Segredo#123', de: '' };
-  assert.equal((await ger('POST', '/api/config/conta', conta)).st, 403, 'só o administrador mexe na conta que envia');
-  assert.equal((await adm('POST', '/api/config/conta', { ...conta, host: 'http://x' })).st, 400);
-  const { j: comConta } = await adm('POST', '/api/config/conta', conta);
-  assert.deepEqual(comConta.conta, { host: '127.0.0.1', porta: PORTA_SMTP, usuario: 'pedro@auditeste.com.br', de: 'pedro@auditeste.com.br', temSenha: true });
-  assert.ok(!JSON.stringify(comConta).includes('Segredo#123') && !bancoCru().includes('Segredo#123'), 'a senha não volta para a tela nem fica legível no banco');
-  const semTls = await adm('POST', '/api/config/teste'); // o servidor de mentira não tem conexão segura
-  assert.ok(semTls.st === 502 && /a senha não foi enviada/.test(semTls.j.erro) && emails.length === antes + 1, 'sem conexão segura, a senha não sai');
-  assert.equal((await adm('POST', '/api/config/conta', { ...conta, senha: '' })).j.conta.temSenha, true, 'senha vazia mantém a gravada');
-  const outro = await adm('POST', '/api/config/conta', { ...conta, senha: '', host: 'outro.servidor.com' });
-  assert.deepEqual([outro.j.conta.temSenha, outro.j.envioLigado], [false, false], 'trocar o servidor sem redigitar não leva a senha junto');
-  assert.deepEqual((await adm('POST', '/api/config/conta', { host: '' })).j.conta, null, 'sem servidor, volta a valer a conta das variáveis');
-  const { j: enviado } = await validar({ colabIds: [11] });
+  assert.deepEqual([cfg.emailValidacao, cfg.envioLigado, cfg.servidor], [['financeiro@auditeste.com.br', 'rh@auditeste.com.br'], true, { host: '127.0.0.1', porta: PORTA_SMTP, daTela: false }]);
+  // Cada pessoa envia do próprio e-mail: sem a senha, nada é registrado; senha recusada não fica gravada.
+  const pede = await validar({ colabIds: [11] });
+  assert.ok(pede.st === 400 && pede.j.pedeSenha, 'pede a senha do e-mail de quem valida');
+  const { j: recusada } = await validar({ colabIds: [11], senhaEmail: 'errada', lembrar: true });
+  assert.ok(recusada.validacoes[11].envio.status === 'falhou' && /não aceitou o seu e-mail ou a senha/.test(recusada.validacoes[11].envio.erro));
+  assert.equal((await ger('GET', '/api/me')).j.usuario.senhaEmail, false, 'senha recusada não fica gravada');
+  assert.equal(logins.at(-1), 'gerente@auditeste.com.br', 'entra com o e-mail de quem validou');
+  assert.equal((await adm('POST', '/api/config/teste')).j.pedeSenha, true);
+  assert.equal((await adm('POST', '/api/config/teste', { senhaEmail: 'Certa#1' })).st, 200);
+  assert.ok(emails.at(-1).includes('To: admin@auditeste.com.br') && emails.at(-1).includes('<admin@auditeste.com.br>') && emails.length === antes + 1, 'o teste sai do e-mail de quem pediu e vai só para ele');
+  assert.equal((await adm('GET', '/api/me')).j.usuario.senhaEmail, false, 'sem pedir para lembrar, a senha não fica');
+  // Servidor configurado na tela: vale no lugar do das variáveis; só o administrador mexe.
+  assert.equal((await ger('POST', '/api/config/servidor', { host: 'email-ssl.com.br', porta: 465 })).st, 403);
+  assert.equal((await adm('POST', '/api/config/servidor', { host: 'http://x', porta: 465 })).st, 400);
+  assert.deepEqual((await adm('POST', '/api/config/servidor', { host: '127.0.0.1', porta: PORTA_SMTP })).j.servidor, { host: '127.0.0.1', porta: PORTA_SMTP, daTela: true });
+  // Fora do próprio computador, a senha só vai por conexão segura (o servidor de mentira não tem).
+  await assert.rejects(Envio.conta({ host: 'localhost', porta: PORTA_SMTP, usuario: 'x@y.com', senha: 's', de: 'x@y.com' })({ para: ['z@y.com'], assunto: 'a', texto: 'b' }), /a senha não foi enviada/);
+  const { j: enviado } = await validar({ colabIds: [11], senhaEmail: 'Certa#2', lembrar: true });
   assert.equal(enviado.validacoes[11].envio.status, 'enviado', 'o que estava esperando vai sem pedir "reenviar"');
+  assert.ok(emails.at(-1).includes('From: "Gestor" <gerente@auditeste.com.br>'), 'sai do e-mail de quem validou, com o nome dele');
+  assert.ok(!bancoCru().includes('Certa#2') && (await ger('GET', '/api/me')).j.usuario.senhaEmail, 'a senha que funcionou fica gravada, cifrada');
   assert.ok(emails.length === antes + 2 && emails.at(-1).includes('filename="Validacao-2026-09-Banco-Aurora.pdf"') && emails.at(-1).includes('JVBERi0xLjQ'), 'e-mail com o PDF anexo');
   assert.ok(Buffer.from(/base64\r\n\r\n([\s\S]+?)\r\n--/.exec(emails.at(-1))[1], 'base64').toString().includes('o recurso foi devidamente validado e está tudo OK'));
   assert.equal((await ger('GET', '/api/validacao/' + semDestino.validacoes[11].docId)).st, 404, 'o documento antigo deu lugar ao novo');
   const repetido = await validar({ colabIds: [11] });
   assert.ok(repetido.st === 409 && repetido.j.jaEnviado && emails.length === antes + 2, 'não manda duas vezes sem querer');
-  assert.equal((await validar({ colabIds: [11], reenviar: true })).st, 200);
+  assert.equal((await validar({ colabIds: [11], reenviar: true })).j.validacoes[11].envio.status, 'enviado', 'reenvio com a senha gravada');
   assert.equal(emails.length, antes + 3, 'reenvio só quando pedido');
+  assert.ok(!(await ger('GET', '/api/usuarios')).j?.usuarios && !JSON.stringify((await adm('GET', '/api/usuarios')).j).includes('senhaEmail'), 'a senha gravada não aparece na lista de usuários');
+  await ger('POST', '/api/minha-senha-email');
+  assert.equal((await ger('GET', '/api/me')).j.usuario.senhaEmail, false, 'esquecer a senha gravada');
   assert.equal((await ger('POST', '/api/fechamentos/conferido', { ano: 2026, mes: 9, projetoId: 101, colabId: 11, ok: false })).st, 409, 'OK de recurso já validado não sai');
   assert.equal((await adm('GET', '/api/config')).j.envios[0].status, 'enviado');
 
@@ -289,7 +297,7 @@ async function ponta(base, docCru, bancoCru) {
   await adm('POST', `/api/usuarios/${novo.id}`, { perfil: 'gerente', audihoras: '' });
   assert.equal((await nova('POST', '/api/login', { usuario: 'nova', senha: 'demo' })).st, 403, 'gerente precisa ser gestor no AudiHoras');
   const acoes = (await adm('GET', '/api/auditoria')).j.map(a => a.acao);
-  for (const a of ['documento_aberto', 'fechamento_aprovar', 'usuario_bloqueado', 'ausencia_registrada', 'validacao_enviado', 'validacao_pendente', 'projeto_criado', 'projeto_ligado', 'config_email', 'config_conta']) assert.ok(acoes.includes(a), 'auditoria: ' + a);
+  for (const a of ['documento_aberto', 'fechamento_aprovar', 'usuario_bloqueado', 'ausencia_registrada', 'validacao_enviado', 'validacao_pendente', 'projeto_criado', 'projeto_ligado', 'config_email', 'config_servidor', 'validacao_falhou']) assert.ok(acoes.includes(a), 'auditoria: ' + a);
 
   for (let i = 0; i < 5; i++) await anon('POST', '/api/login', { usuario: 'rh', senha: 'x' });
   assert.equal((await anon('POST', '/api/login', { usuario: 'rh', senha: 'demo' })).st, 429, 'bloqueio por tentativas');
