@@ -1606,7 +1606,7 @@ const ACOES = {
   alocacao_removida: 'Alocação removida', fechamento_conferir: 'Conferência iniciada', fechamento_aprovar: 'Fechamento aprovado',
   fechamento_reabrir: 'Fechamento reaberto', fechamento_decisao: 'Decisão de ausência', fechamento_pessoa: 'OK no profissional',
   validacao_enviado: 'Validação enviada por e-mail', validacao_pendente: 'Validação aguardando envio', validacao_falhou: 'Envio da validação falhou',
-  config_email: 'Destino das validações', config_email_teste: 'E-mail de teste', conta_criada: 'Conta criada', conta_atualizada: 'Ficha de conta', conta_excluida: 'Conta excluída',
+  config_email: 'Destino das validações', config_email_teste: 'E-mail de teste', config_conta: 'Conta que envia os e-mails', conta_criada: 'Conta criada', conta_atualizada: 'Ficha de conta', conta_excluida: 'Conta excluída',
   projeto_criado: 'Projeto criado', projeto_excluido: 'Projeto excluído', projeto_ligado: 'Projeto ligado ao AudiHoras', projeto_equipe: 'Equipe do projeto', projeto_checklist: 'Checklist do projeto',
 };
 function auditoria() {
@@ -1619,19 +1619,38 @@ function auditoria() {
 
 // ---------- E-mails das validações ----------
 function envios() {
-  const sit = { enviado: ['Enviado', 'fec-aprovado'], pendente: ['Aguardando envio', 'fec-conferencia'], falhou: ['Falhou', 'fec-reaberto'] };
+  const sit = { enviado: ['Enviado', 'fec-aprovado'], pendente: ['Aguardando envio', 'fec-conferencia'], falhou: ['Falhou', 'fec-reaberto'] }, ct = CFG.conta || {};
   const linhas = CFG.envios.map(e => [dataHora(e.em), esc(e.por), e.recursos.map(esc).join(', '), esc(e.assunto), e.para.map(esc).join(', ') || '·', `${pill(...sit[e.status])}${e.erro ? `<small>${esc(e.erro)}</small>` : ''}`]);
-  return cab('Administração', 'E-mails das validações', 'Para onde vai o documento quando um gerente finaliza a validação de um recurso no fechamento.')
+  const situacao = CFG.envioLigado ? `<div class="aviso"><b>● Envio ligado</b><br>Os e-mails saem de ${esc(CFG.remetente)}${CFG.conta ? '' : ' (conta das variáveis do servidor)'}.</div>`
+    : CFG.conta ? `<div class="aviso ambar"><b>● Falta a senha</b><br>A conta ${esc(ct.usuario)} está preenchida, mas sem senha. Digite a senha da caixa e salve; depois use o e-mail de teste.</div>`
+      : '<div class="aviso ambar"><b>● Envio ainda não ligado</b><br>Preencha a conta que envia. Até lá, cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando.</div>';
+  return cab('Administração', 'E-mails das validações', 'Para onde vai o documento quando um gerente finaliza a validação de um recurso no fechamento, e de qual conta ele sai.')
     + `<section class="card"><h2>Endereço de destino</h2><p class="sub">Quem recebe o e-mail com o PDF da validação. Até 5 endereços, separados por vírgula.</p><br>
         <form class="form" onsubmit="salvarConfig(event, this)">
           <label class="largo">E-mail de destino<input name="emailValidacao" maxlength="400" value="${esc(CFG.emailValidacao.join(', '))}" placeholder="financeiro@auditeste.com.br"></label>
-          <button class="btn">Salvar</button>
-          <button type="button" class="btn-sec" onclick="testarEmail(this)">Enviar e-mail de teste</button>
-        </form>
-        <div class="aviso ${CFG.envioLigado ? '' : 'ambar'}">${CFG.envioLigado ? `<b>● Envio ligado</b><br>Os e-mails saem de ${esc(CFG.remetente)}.`
-          : '<b>● Envio ainda não ligado no servidor</b><br>Falta informar a conta que envia, nas variáveis do servidor: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS e EMAIL_FROM. Até lá, cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando.'}</div></section>
+          <button class="btn">Salvar destino</button>
+        </form></section>
+      <section class="card"><h2>Conta que envia</h2><p class="sub">A caixa de e-mail de onde as validações saem. A senha fica cifrada no servidor e nunca volta para esta tela.</p><br>
+        <form class="form" onsubmit="salvarContaEnvio(event, this)">
+          <label>Servidor de envio (SMTP)<input name="host" maxlength="100" autocapitalize="none" spellcheck="false" value="${esc(ct.host)}" placeholder="email-ssl.com.br"></label>
+          <label>Porta<select name="porta">${opcoes({ 465: '465 (conexão segura direta)', 587: '587 (STARTTLS)' }, ct.porta || 465)}</select></label>
+          <label>Usuário da caixa<input name="usuario" maxlength="120" autocomplete="off" autocapitalize="none" spellcheck="false" value="${esc(ct.usuario)}" placeholder="nome@auditeste.com.br"></label>
+          <label>Senha da caixa<input name="senha" type="password" maxlength="200" autocomplete="new-password" placeholder="${ct.temSenha ? 'Gravada. Vazio mantém a atual' : 'Digite a senha'}"></label>
+          <label>Remetente<input name="de" type="email" maxlength="120" value="${esc(ct.de)}" placeholder="Vazio usa o usuário"></label>
+          <button class="btn">Salvar conta</button>
+          <button type="button" class="btn-sec" onclick="testarEmail(this)">Enviar e-mail de teste para mim</button>
+          <p class="dica inteiro">O teste vai só para o seu endereço (${esc(EU.email)}), não para o destino das validações. Para desligar o envio, apague o servidor e salve.</p>
+        </form>${situacao}</section>
       <section class="card"><h2>Últimos envios</h2><p class="sub">Cada validação finalizada no fechamento (as 200 mais recentes)</p><br>
         ${tabela(['Quando', 'Quem validou', 'Recursos', 'Assunto', 'Para', 'Situação'], linhas, { vazio: 'Nenhuma validação finalizada ainda.' })}</section>`;
+}
+async function salvarContaEnvio(ev, f) {
+  ev.preventDefault();
+  try {
+    CFG = await api('/api/config/conta', { method: 'POST', body: Object.fromEntries(new FormData(f)) });
+    render(false);
+    aviso(CFG.conta ? (CFG.conta.temSenha ? 'Conta de envio salva.' : 'Conta salva. Falta a senha.') : 'Envio desligado.', !!CFG.conta && !CFG.conta.temSenha);
+  } catch (e) { if (!e.silencioso) aviso(e.message, true); }
 }
 async function salvarConfig(ev, f) {
   ev.preventDefault();
@@ -1645,7 +1664,7 @@ async function testarEmail(b) {
   b.disabled = true;
   try {
     CFG = await api('/api/config/teste', { method: 'POST' });
-    aviso('E-mail de teste enviado.');
+    aviso(`E-mail de teste enviado para ${CFG.testePara}.`);
   } catch (e) { if (!e.silencioso) aviso(e.message, true); }
   b.disabled = false;
 }

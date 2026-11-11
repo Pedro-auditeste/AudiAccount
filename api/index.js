@@ -108,6 +108,8 @@ module.exports = async (req, res) => {
         dadosAH: AH.dados,
         fotoAH: AH.foto,
         apontamentosAH: AH.apontamentos,
+        cifrar: async txt => (await cifra()).cifrar(Buffer.from(txt)).toString('base64'),
+        decifrar: async b64 => (await cifra()).decifrar(Buffer.from(b64, 'base64')).toString(),
         enviarEmail: Envio.transporte(process.env),
       });
       // Banco vazio: o primeiro administrador é o do ADMIN_EMAIL (configurado no projeto da Vercel).

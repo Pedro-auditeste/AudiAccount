@@ -110,7 +110,7 @@ async function smtp(cfg, msg) {
       if (!seguro) throw new Error('O servidor de e-mail não oferece conexão segura; a senha não foi enviada.');
       await cmd('AUTH LOGIN', 334);
       await cmd(b64(cfg.usuario), 334);
-      await cmd(b64(cfg.senha), 235);
+      await cmd(b64(cfg.senha), 235).catch(e => { throw new Error('O servidor de e-mail não aceitou o usuário ou a senha da caixa. ' + e.message); });
     }
     await cmd(`MAIL FROM:<${endereco(cfg.de)}>`, 250);
     for (const p of para) await cmd(`RCPT TO:<${p}>`, 250, 251);
@@ -122,9 +122,11 @@ async function smtp(cfg, msg) {
   }
 }
 
-// O envio só existe com SMTP_HOST configurado (SMTP_PORT, SMTP_USER, SMTP_PASS e EMAIL_FROM completam).
+// Envio por uma conta: { host, porta, usuario, senha, de }.
+exports.conta = cfg => Object.assign(msg => smtp(cfg, msg), { remetente: endereco(cfg.de) });
+// Conta das variáveis do servidor: só existe com SMTP_HOST (SMTP_PORT, SMTP_USER, SMTP_PASS e EMAIL_FROM completam).
 exports.transporte = env => {
   if (!env.SMTP_HOST) return null;
   const cfg = { host: env.SMTP_HOST, porta: Number(env.SMTP_PORT) || 587, usuario: env.SMTP_USER || '', senha: env.SMTP_PASS || '', de: env.EMAIL_FROM || env.SMTP_USER || 'account@localhost' };
-  return Object.assign(msg => smtp(cfg, msg), { remetente: endereco(cfg.de) });
+  return exports.conta(cfg);
 };

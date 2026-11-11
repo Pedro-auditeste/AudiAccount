@@ -416,7 +416,8 @@ async function admin(browser, quem, usuario) {
   await page.evaluate(() => { const f = document.querySelector('#conteudo form'); f.emailValidacao.value = 'financeiro@auditeste.com.br, rh@auditeste.com.br'; f.requestSubmit(); }); await sleep(900);
   if (await page.evaluate(() => CFG.emailValidacao.length) !== 2) problemas.push(`${quem}: o destino das validações não salvou`);
   await page.evaluate(() => testarEmail(document.querySelector('#conteudo form .btn-sec'))); await sleep(1300);
-  if (smtp.emails.length !== antes + 1) problemas.push(`${quem}: o e-mail de teste não saiu`);
+  if (smtp.emails.length !== antes + 1 || !smtp.emails.at(-1).includes('To: admin@auditeste.com.br')) problemas.push(`${quem}: o e-mail de teste não saiu só para quem pediu`);
+  if (!(await page.$('#conteudo form input[name=senha][type=password]'))) problemas.push(`${quem}: falta o formulário da conta que envia`);
   if (!(await page.$('#conteudo table tbody tr:not(.vazia)'))) problemas.push(`${quem}: a lista de envios está vazia depois da validação do gerente`);
   await checar(page, quem, '#envios depois de salvar e testar');
   return page;

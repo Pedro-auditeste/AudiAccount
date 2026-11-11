@@ -75,7 +75,7 @@ const cliente = base => {
 };
 
 // O sistema inteiro pela API. docCru(id) devolve o documento do cofre como ficou guardado.
-async function ponta(base, docCru) {
+async function ponta(base, docCru, bancoCru) {
   const ger = cliente(base), rh = cliente(base), adm = cliente(base), anon = cliente(base);
 
   // Primeiro acesso: o administrador do ADMIN_EMAIL entra e cadastra a equipe do teste.
@@ -188,7 +188,20 @@ async function ponta(base, docCru) {
   const { j: cfg } = await adm('POST', '/api/config', { emailValidacao: 'Financeiro@auditeste.com.br; rh@auditeste.com.br' });
   assert.deepEqual([cfg.emailValidacao, cfg.envioLigado, cfg.remetente], [['financeiro@auditeste.com.br', 'rh@auditeste.com.br'], true, 'account@auditeste.com.br']);
   assert.equal((await adm('POST', '/api/config/teste')).st, 200);
-  assert.ok(emails.at(-1).includes('To: financeiro@auditeste.com.br, rh@auditeste.com.br') && emails.length === antes + 1, 'e-mail de teste');
+  assert.ok(emails.at(-1).includes('To: admin@auditeste.com.br') && emails.length === antes + 1, 'o e-mail de teste vai só para quem pediu');
+  // Conta que envia gravada pelo administrador: a senha fica cifrada, não volta para a tela e não segue para outro servidor.
+  const conta = { host: '127.0.0.1', porta: PORTA_SMTP, usuario: 'pedro@auditeste.com.br', senha: 'Segredo#123', de: '' };
+  assert.equal((await ger('POST', '/api/config/conta', conta)).st, 403, 'só o administrador mexe na conta que envia');
+  assert.equal((await adm('POST', '/api/config/conta', { ...conta, host: 'http://x' })).st, 400);
+  const { j: comConta } = await adm('POST', '/api/config/conta', conta);
+  assert.deepEqual(comConta.conta, { host: '127.0.0.1', porta: PORTA_SMTP, usuario: 'pedro@auditeste.com.br', de: 'pedro@auditeste.com.br', temSenha: true });
+  assert.ok(!JSON.stringify(comConta).includes('Segredo#123') && !bancoCru().includes('Segredo#123'), 'a senha não volta para a tela nem fica legível no banco');
+  const semTls = await adm('POST', '/api/config/teste'); // o servidor de mentira não tem conexão segura
+  assert.ok(semTls.st === 502 && /a senha não foi enviada/.test(semTls.j.erro) && emails.length === antes + 1, 'sem conexão segura, a senha não sai');
+  assert.equal((await adm('POST', '/api/config/conta', { ...conta, senha: '' })).j.conta.temSenha, true, 'senha vazia mantém a gravada');
+  const outro = await adm('POST', '/api/config/conta', { ...conta, senha: '', host: 'outro.servidor.com' });
+  assert.deepEqual([outro.j.conta.temSenha, outro.j.envioLigado], [false, false], 'trocar o servidor sem redigitar não leva a senha junto');
+  assert.deepEqual((await adm('POST', '/api/config/conta', { host: '' })).j.conta, null, 'sem servidor, volta a valer a conta das variáveis');
   const { j: enviado } = await validar({ colabIds: [11] });
   assert.equal(enviado.validacoes[11].envio.status, 'enviado', 'o que estava esperando vai sem pedir "reenviar"');
   assert.ok(emails.length === antes + 2 && emails.at(-1).includes('filename="Validacao-2026-09-Banco-Aurora.pdf"') && emails.at(-1).includes('JVBERi0xLjQ'), 'e-mail com o PDF anexo');
@@ -276,7 +289,7 @@ async function ponta(base, docCru) {
   await adm('POST', `/api/usuarios/${novo.id}`, { perfil: 'gerente', audihoras: '' });
   assert.equal((await nova('POST', '/api/login', { usuario: 'nova', senha: 'demo' })).st, 403, 'gerente precisa ser gestor no AudiHoras');
   const acoes = (await adm('GET', '/api/auditoria')).j.map(a => a.acao);
-  for (const a of ['documento_aberto', 'fechamento_aprovar', 'usuario_bloqueado', 'ausencia_registrada', 'validacao_enviado', 'validacao_pendente', 'projeto_criado', 'projeto_ligado', 'config_email']) assert.ok(acoes.includes(a), 'auditoria: ' + a);
+  for (const a of ['documento_aberto', 'fechamento_aprovar', 'usuario_bloqueado', 'ausencia_registrada', 'validacao_enviado', 'validacao_pendente', 'projeto_criado', 'projeto_ligado', 'config_email', 'config_conta']) assert.ok(acoes.includes(a), 'auditoria: ' + a);
 
   for (let i = 0; i < 5; i++) await anon('POST', '/api/login', { usuario: 'rh', senha: 'x' });
   assert.equal((await anon('POST', '/api/login', { usuario: 'rh', senha: 'demo' })).st, 429, 'bloqueio por tentativas');
@@ -311,10 +324,10 @@ async function ponta(base, docCru) {
   assert.ok(semGestor.equipe.length === 11 && semGestor.equipe.every(c => c.id > 0) && semGestor.lancamentos.every(l => l.c > 0), 'sem as horas do gestor, segue a equipe');
 
   await localNoAr;
-  await ponta(`http://127.0.0.1:${PORTA_LOCAL}`, id => fs.readFileSync(path.join(dir, 'cofre', id)));
+  await ponta(`http://127.0.0.1:${PORTA_LOCAL}`, id => fs.readFileSync(path.join(dir, 'cofre', id)), () => fs.readFileSync(path.join(dir, 'db.json'), 'utf8'));
   console.log('ok: servidor local');
 
-  await ponta(`http://127.0.0.1:${PORTA_VERCEL}`, id => Buffer.from(redis.get('account:doc:' + id), 'base64'));
+  await ponta(`http://127.0.0.1:${PORTA_VERCEL}`, id => Buffer.from(redis.get('account:doc:' + id), 'base64'), () => redis.get('account:banco'));
   // No Redis não pode ficar nada que sirva de senha do AudiHoras, nem o sid de alguém.
   const pmdGestor = AH.md5('gestor' + AH.md5('audi' + 'demo'));
   const tudo = JSON.stringify([...redis]);

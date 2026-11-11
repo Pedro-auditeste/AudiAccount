@@ -21,7 +21,7 @@ Abre em http://localhost:3000. Para a rede acessar: `HOST=0.0.0.0 npm start`.
 
 Variáveis: `PORT` (3000), `HOST` (127.0.0.1), `AUDIHORAS_API` (http://152.249.241.111:72/api/), `DATA_DIR` (./data), `ADMIN_EMAIL`, `COFRE_KEY` (64 hex; sem ela a chave fica em `data/cofre.key`).
 
-E-mail das validações do fechamento (opcional; vale também na Vercel): `SMTP_HOST`, `SMTP_PORT` (587; 465 para TLS direto), `SMTP_USER`, `SMTP_PASS` e `EMAIL_FROM`. Sem `SMTP_HOST` nada é enviado: cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando. O endereço de destino é configurado pelo administrador na tela E-mails.
+E-mail das validações do fechamento: o administrador configura na tela E-mails o endereço de destino e a conta que envia (servidor SMTP, porta 465 ou 587, usuário, senha e remetente). A senha fica cifrada com a chave do cofre e nunca volta para a tela; trocar o servidor ou o usuário exige digitar a senha de novo. O e-mail de teste vai só para quem pediu. Sem conta configurada nada é enviado: cada validação fica registrada, com o PDF para baixar, e o e-mail fica aguardando. Alternativa pelas variáveis do servidor (vale quando a tela está vazia): `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` e `EMAIL_FROM`.
 
 ## Na Vercel
 

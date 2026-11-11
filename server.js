@@ -43,6 +43,8 @@ const nucleo = Nucleo.criar({
   dadosAH: AH.dados,
   fotoAH: AH.foto,
   apontamentosAH: AH.apontamentos,
+  cifrar: txt => cofre.cifrar(Buffer.from(txt)).toString('base64'),
+  decifrar: b64 => cofre.decifrar(Buffer.from(b64, 'base64')).toString(),
   enviarEmail: Envio.transporte(process.env),
 });
 
