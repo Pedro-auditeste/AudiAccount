@@ -1,6 +1,7 @@
 // ACCOUNT na Vercel. Cada requisição pode cair num servidor novo, que esquece tudo depois: banco, sessões,
 // cache do AudiHoras e documentos do cofre ficam no Redis (Upstash, pela API REST; nada para instalar).
-// As telas (public/) a Vercel entrega sozinha; o vercel.json manda todo /api/* para cá.
+// As telas (public/) a Vercel entrega sozinha; o vercel.json manda todo /api/* para cá. Na Railway, o railway.js
+// chama esta mesma função, com o mesmo Redis.
 const crypto = require('node:crypto');
 const AH = require('../audihoras.js');
 const Nucleo = require('../nucleo.js');
@@ -13,7 +14,7 @@ const MAX_DOC = 3e6; // a Vercel recusa corpo acima de 4,5 MB, e o documento vai
 
 async function redis(...cmd) {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-  if (!url) throw Nucleo.falha(500, 'O banco (Redis da Upstash) ainda não está ligado a este projeto na Vercel.');
+  if (!url) throw Nucleo.falha(500, 'O banco (Redis da Upstash) ainda não está ligado a este servidor: faltam KV_REST_API_URL e KV_REST_API_TOKEN.');
   const r = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN}` },
@@ -41,7 +42,14 @@ async function travar(nome, fn) {
 }
 
 // Cache do AudiHoras por usuário de lá, num hash do Redis com a mesma cara do Map que audihoras.js usa.
+// Na Railway o processo fica no ar e longe do Redis: lá o cache fica na memória (CACHE_NA_MEMORIA).
+const memoria = new Map();
 const cacheDe = usuario => {
+  if (process.env.CACHE_NA_MEMORIA) {
+    if (!memoria.has(usuario)) memoria.set(usuario, new Map());
+    const m = memoria.get(usuario);
+    return { get: async c => m.get(c), set: async (c, v) => { m.set(c, v); }, clear: async () => { m.clear(); } };
+  }
   const k = P + 'cache:' + usuario;
   return {
     get: async c => JSON.parse((await redis('HGET', k, c)) || 'null'),

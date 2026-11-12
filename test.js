@@ -9,7 +9,7 @@ const AH = require('./audihoras.js');
 const Nucleo = require('./nucleo.js');
 const mock = require('./audihoras-mock.js');
 
-const PORTA_LOCAL = 3999, PORTA_AH = 3998, PORTA_REDIS = 3997, PORTA_VERCEL = 3996, PORTA_SMTP = 3995;
+const PORTA_LOCAL = 3999, PORTA_AH = 3998, PORTA_REDIS = 3997, PORTA_VERCEL = 3996, PORTA_SMTP = 3995, PORTA_RAILWAY = 3993;
 const SMTP = { SMTP_HOST: '127.0.0.1', SMTP_PORT: PORTA_SMTP };
 const AH_URL = `http://127.0.0.1:${PORTA_AH}/`, ADMIN_EMAIL = 'admin@auditeste.com.br';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'account-'));
@@ -342,6 +342,23 @@ async function ponta(base, docCru, bancoCru) {
   assert.ok(!tudo.includes(pmdGestor), 'pmd do AudiHoras cifrado no Redis');
   assert.ok(![...redis.keys()].some(k => k.startsWith('account:trava:')), 'nenhuma trava esquecida');
   console.log('ok: jeito Vercel (Redis)');
+
+  // Jeito Railway: railway.js serve as telas e chama a mesma função, com o cache do AudiHoras na memória.
+  const rw = spawn(process.execPath, [path.join(__dirname, 'railway.js')], { env: { ...process.env, PORT: PORTA_RAILWAY }, stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    await new Promise(ok => rw.stdout.on('data', c => String(c).includes('ACCOUNT no ar') && ok()));
+    const base = `http://127.0.0.1:${PORTA_RAILWAY}`, g = cliente(base);
+    assert.ok((await (await fetch(base + '/')).text()).includes('id="app"'), 'tela inicial');
+    assert.equal((await fetch(base + '/app.js')).headers.get('cache-control'), 'no-cache');
+    for (const p of ['/server.js', '/%2e%2e/server.js', '/data/db.json']) assert.equal((await fetch(base + p)).status, 404, 'fora de public/: ' + p);
+    assert.equal((await g('POST', '/api/login', { usuario: 'gestor', senha: 'demo' })).st, 200);
+    for (const k of [...redis.keys()]) if (k.startsWith('account:cache:')) redis.delete(k);
+    assert.ok((await g('GET', '/api/dados?ano=2026&mes=9')).j.equipe.length > 10, 'mesmos dados, mesmo login');
+    assert.ok(![...redis.keys()].some(k => k.startsWith('account:cache:')), 'na Railway o cache do AudiHoras fica na memória');
+  } finally {
+    rw.kill();
+  }
+  console.log('ok: jeito Railway (mesmo Redis, cache na memória)');
   console.log('ok: ACCOUNT passou em todas as checagens');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => {
   srv.kill();
