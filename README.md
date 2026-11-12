@@ -33,6 +33,12 @@ E-mail das validações do fechamento: cada gerente envia do próprio e-mail (o 
 
 Diferenças do servidor local: documentos de até 3 MB (a Vercel recusa envio acima de 4,5 MB) e funções em São Paulo (`gru1`), perto do AudiHoras. A credencial do AudiHoras guardada na sessão vai cifrada com uma chave que só existe no cookie de quem entrou.
 
+## Na Railway
+
+Também no ar em https://audiaccount.vercel.app e em https://audiaccount.up.railway.app (projeto ACCOUNT no workspace Governança, região da Virgínia; cada push na main publica). `railway.js` serve as telas e chama a mesma função da Vercel, com o mesmo Redis: os dois endereços enxergam os mesmos dados e as mesmas pessoas. Na Railway o cache do AudiHoras fica na memória do processo.
+
+Variáveis do serviço: `KV_REST_API_URL` e `KV_REST_API_TOKEN`, as mesmas da Vercel. A configuração do serviço (início `node railway.js`, região, domínio e repositório) está em `.railway/railway.ts` e só vale depois de `railway config apply` (com `npm install --no-save railway`).
+
 ## Organização
 
 `nucleo.js` tem as regras e rotas, `http-comum.js` o que o servidor local e a Vercel fazem igual, `server.js` liga o núcleo à rede, ao disco e à criptografia, `audihoras.js` lê o AudiHoras, `envio.js` gera o PDF da validação e envia o e-mail (SMTP, sem biblioteca), `public/regras.js` tem os cálculos usados pela tela e pelo servidor. `audihoras-mock.js`, `dados-ficticios.js` e `smtp-falso.js` servem só ao `npm test` e à varredura.
