@@ -234,7 +234,9 @@ async function abrirApp() {
 function atualizarSelos() {
   const s = $('#selo');
   s.hidden = !tem('gerente');
-  s.textContent = D ? '● AudiHoras conectado' : '○ AudiHoras desconectado';
+  // Sem gestor no AudiHoras a conexão funciona (o login passou por lá), só não há equipe para trazer.
+  s.textContent = D ? '● AudiHoras conectado' : SEM_HORAS ? '○ Sem equipe no AudiHoras' : '○ AudiHoras desconectado';
+  s.title = D ? '' : SEM_HORAS || 'Não foi possível consultar o AudiHoras agora. Use Atualizar ou entre de novo.';
   s.className = D ? 'selo' : 'selo off';
 }
 const esqueleto = () => `<div class="esq" style="height:150px;border-radius:22px;margin-bottom:20px"></div>
